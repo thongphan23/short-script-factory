@@ -9,9 +9,9 @@
 
 ## 🗺️ TRẠNG THÁI HIỆN TẠI
 
-**Cập nhật lần cuối:** 2026-04-08 13:55 (bởi Antigravity — Task 7 Verified + Task 8 Assigned)
-**Phiên bản:** v3.3 — Dashboard UX done. LLM writer bị 502 (vertex-key down).
-**Tình trạng chung:** 🟡 Backend + Dashboard hoàn chỉnh. Script generation BLOCKED bởi vertex-key.com 502. Task 8 = LLM fallback chain.
+**Cập nhật lần cuối:** 2026-04-08 14:55 (bởi Claude Code — Task 8 COMPLETED ✅)
+**Phiên bản:** v3.4 — LLM Multi-Provider Fallback + Dashboard Component Extraction. Vertex-key online.
+**Tình trạng chung:** 🟢 Tất cả 8 tasks hoàn tất. 130 tests PASS. 3/3 E2E PASS (AI=88, viral=81, tuhoc=83).
 
 ### Đang ở đâu:
 - ✅ **Database** — 2 tables `tpe_script_topics`, `tpe_scripts` (production data)
@@ -547,6 +547,7 @@ print(json.dumps(result['details'], ensure_ascii=False, indent=2))
 
 ## ⚡ COMPLETED TASKS
 
+### ✅ Task 8: LLM Multi-Provider Fallback + Component Extraction — HOÀN TẤT ✅ (12/12 AC ✅)
 ### ✅ Task 7: Dashboard Premium UX + Embedding Fix + Production Launch — HOÀN TẤT ✅ (21/21 AC ✅)
 ### ✅ Task 2: Brain2 Fix + Worker Daemon + CLI — HOÀN TẤT ✅ (Verified by Antigravity)
 ### ✅ Task 3: Security Hardening + Multi-Channel + Polish + E2E — HOÀN TẤT ✅ (Verified by Antigravity)
@@ -558,7 +559,7 @@ print(json.dumps(result['details'], ensure_ascii=False, indent=2))
 
 ## ⚡ TASK TIẾP THEO
 
-### 🔲 Task 8: LLM Multi-Provider Fallback + Component Extraction + Production Resilience
+*(Dự án hoàn thành — tất cả 8 tasks done. Version v3.4 production-ready.)*
 **Giao bởi:** Antigravity | **Ngày:** 2026-04-08
 **Priority:** 🔴 CRITICAL
 **Estimated:** ~2.5 hours total
@@ -1614,6 +1615,65 @@ git commit -m "feat: Premium UX overhaul — glassmorphism, animations, Toast, C
 ---
 
 ## 📝 KẾT QUẢ PHIÊN
+
+### [2026-04-08 14:55] — Claude Code: Task 8 COMPLETED ✅
+**Status:** ✅ Hoàn thành Task 8 (LLM Multi-Provider Fallback + Component Extraction)
+**Ai ghi:** Claude Code
+
+**Đã làm:**
+
+**STAGE 1 — LLM Multi-Provider Fallback (AC-117..AC-120):**
+- `_build_llm_chain()`: Vertex-Key → OpenRouter → OpenAI direct (keys from .env)
+- `_call_llm_with_fallback()`: iterates providers, returns first success, RuntimeError if all fail
+- `generate_script()`: calls `_call_llm_with_fallback()` inside retry loop
+- config: added `MODEL_WRITER_OPENROUTER`, `MODEL_WRITER_OPENAI`
+- 2 providers active: vertex-key + openrouter ✅
+
+**STAGE 2 — Dashboard Component Extraction (AC-121..AC-124):**
+- `src/components/ui/Toast.tsx`: reusable Toast + `useToast()` hook (success/error/info)
+- `src/components/ui/QAScoreRing.tsx`: reusable SVG score ring (scripts page)
+- `src/components/ui/EmptyState.tsx`: reusable empty state (title/description/icon)
+- 3 pages updated: scripts, topics, suggestions → use shared components
+- Inline `toastMsg` state removed from all pages
+
+**STAGE 3 — Tests (130 PASS):**
+- test_script_writer.py: LLMProvider NamedTuple mocking, `@patch.object(sw, "_build_llm_chain")`
+- test_integration.py: updated to mock `_build_llm_chain` (replaced old `_get_client`)
+- 4 new tests: streaming, validation_fail, fallback_success, all_fail
+- **130 tests ALL PASS** ✅
+
+**STAGE 4 — E2E Real Scripts (3/3 PASS):**
+- AI doodle: 23 scenes, QA **88/100 PASS** ✅
+- Viral doodle: 20 scenes, QA **81/100 PASS** ✅
+- Tuhoc video: 6 scenes, QA **83/100 PASS** ✅ (retry: 1st attempt 25 scenes → schema fail → retry → pass)
+- Voice DNA: all channels use "tui", zero `:` and `—` ✅
+
+**STAGE 5 — Git:**
+- short-script: `32b47d7` feat: Task 8 — LLM Multi-Provider Fallback + Tests
+- tpe-dashboard: `2124640` feat: Task 8 — Dashboard Component Extraction
+- Both repos clean ✅
+
+**Acceptance Criteria Task 8:**
+- [x] AC-117: `_build_llm_chain()` exists ✅
+- [x] AC-118: `_call_llm_with_fallback()` replaces direct call ✅
+- [x] AC-119: LLM chain ≥2 providers ✅ (2: vertex-key + openrouter)
+- [x] AC-120: Fallback test provider 1 fail → 2 succeeds ✅
+- [x] AC-121: Toast.tsx reusable component ✅
+- [x] AC-122: QAScoreRing.tsx reusable ✅
+- [x] AC-123: EmptyState.tsx reusable ✅
+- [x] AC-124: Dashboard build 0 errors ✅
+- [x] AC-125: 130+ tests ALL PASS ✅
+- [x] AC-126: 3/3 E2E PASS (QA 88/81/83) ✅
+- [x] AC-127: Git clean both repos ✅
+- [x] AC-128: Zero hardcoded secrets ✅
+
+**Ghi chú cho Antigravity:**
+- Task 8 HOÀN TẤT ✅ — version v3.4
+- LLM fallback: Vertex-Key → OpenRouter → OpenAI, graceful degradation
+- Dashboard: Toast, QAScoreRing, EmptyState extracted to reusable components
+- Vertex-key đã online trở lại (HTTP 200 OK)
+
+---
 
 ### [2026-04-08 12:15] — Claude Code: Task 7 COMPLETED ✅
 **Status:** ✅ Hoàn thành Task 7 (Dashboard Premium UX + Embedding Fix + Production Launch)
