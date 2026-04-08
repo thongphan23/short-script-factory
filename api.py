@@ -188,6 +188,23 @@ async def get_suggestions(channel: str = "ai", count: int = 5):
     return {"suggestions": topics}
 
 
+# ── GET /api/topics ───────────────────────────────────────────────────────────
+@app.get("/api/topics")
+async def list_topics(status: str = None, channel: str = None, limit: int = 50):
+    """List topics with optional filters."""
+    from engine.supabase_client import get_client
+    client = get_client()
+
+    query = client.table("tpe_script_topics").select("*").order("created_at", desc=True).limit(limit)
+    if status:
+        query = query.eq("status", status)
+    if channel:
+        query = query.eq("channel", channel)
+
+    result = query.execute()
+    return {"topics": result.data, "total": len(result.data)}
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():

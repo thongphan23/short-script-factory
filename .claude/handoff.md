@@ -9,9 +9,9 @@
 
 ## 🗺️ TRẠNG THÁI HIỆN TẠI
 
-**Cập nhật lần cuối:** 2026-04-08 09:15 (bởi Claude Code — Task 4 COMPLETED)
-**Phiên bản:** v3.0 — Phase 1+2+3+4 hoàn tất, PRODUCTION READY
-**Tình trạng chung:** 🟢 Full production stack done. Embedding resilience + FastAPI + Worker + Topic Engine + launchctl services.
+**Cập nhật lần cuối:** 2026-04-08 10:28 (bởi Antigravity — Task 4+5 Verified + Task 6 Assigned)
+**Phiên bản:** v3.1 — Phase 4+5 hoàn tất, bắt đầu production hardening
+**Tình trạng chung:** 🟢 Full stack done. Cần git commit, test cleanup, dashboard polish, E2E verify.
 
 ### Đang ở đâu:
 - ✅ **Database** — 2 tables `tpe_script_topics`, `tpe_scripts` (production data)
@@ -33,8 +33,8 @@
 - ~~Phase 1: Database + Core Engine~~ ✅
 - ~~Phase 2: Brain2 fix + Worker daemon + CLI~~ ✅
 - ~~Phase 3: Security + Multi-channel + Polish + E2E~~ ✅
-- ~~Phase 4: Embedding Resilience + API + Production Ready~~ ✅ — HOÀN TẤT
-- 🔲 Phase 5: Dashboard Integration (read handoff.md Task 5)
+- ~~Phase 4: Embedding Resilience + API + Production Ready~~ ✅
+- ~~Phase 5: Dashboard Integration~~ ✅ — HOÀN TẤT
 
 ---
 
@@ -547,888 +547,571 @@ print(json.dumps(result['details'], ensure_ascii=False, indent=2))
 
 ---
 
-### 🔲 Task 5: Dashboard Integration
+### ✅ Task 5: Dashboard Integration — HOÀN TẤT ✅
 
 **Mô tả:**
-OpenRouter API key đã bị revoke (401 "User not found"), cần fix embedding resilience. Cleanup test artifacts bị bỏ sót. Thêm error handling hardening, dispatcher upgrade, topic engine, webhook API cho dashboard integration, launchctl service, git init, documentation, và integration tests. Task này dài, làm tuần tự.
+Kết nối `short-script` FastAPI (port 5175) vào `tpe-dashboard` (Next.js 14, Zustand). Tạo "Script Factory" section mới với 4 trang: overview, topic queue, script list, và AI suggestions.
+
+**Realized scope (từ analysis thực tế):**
+- `tpe-dashboard` hiện kết nối `tpe-backend` (port 8000, LangGraph PASTOR)
+- `short-script` API (port 5175) chạy độc lập, chưa được dashboard gọi
+- Task 5 = kết nối hai hệ thống này
 
 **Build Order:**
 
 ---
 
-#### STAGE 1: Embedding Provider Resilience (25 phút) — 🔴 CRITICAL
+#### STAGE 1: Dashboard Architecture Analysis (10 phút)
 
-**Vấn đề:** OpenRouter key bị revoke → Brain2 RAG trả 0 results → scripts thiếu context.
+**Đọc files để xác định scope:**
+- `tpe-dashboard/src/store/kanbanStore.ts` — kết nối `tpe-backend` (port 8000), dùng Zustand
+- `tpe-dashboard/src/lib/types.ts` — `ContentState`, `ContentStatus` (5 giá trị)
+- `tpe-dashboard/src/app/page.tsx` — Kanban board 5 columns, DnD với `@hello-pangea/dnd`
+- `tpe-dashboard/src/app/review/[id]/page.tsx` — QA review page
+- `tpe-dashboard/src/app/layout.tsx` — sidebar nav (LayoutDashboard + PenTool)
 
-**Fix plan — multi-provider fallback:**
+**Tạo `src/store/shortScriptStore.ts` — Zustand store mới:**
+- API_BASE = `http://localhost:5175/api`
+- Types: `ScriptRow`, `TopicRow`, `SuggestionRow`, `PipelineStats`
+- Actions: `fetchStats`, `fetchScripts`, `fetchTopics`, `fetchSuggestions`, `generate`, `queueTopics`, `dispatchScript`
 
-**1.1) Update `engine/brain2_client.py` — fallback chain:**
-
+**Thêm `/api/topics` endpoint vào `short-script/api.py`:**
 ```python
-# Provider priority: Vertex-Key → OpenAI direct → OpenRouter
-# Config thêm: OPENAI_API_KEY (optional), EMBEDDING_PROVIDER
-
-def _get_embedding(text: str) -> list[float]:
-    """Try multiple embedding providers with fallback."""
-    providers = _build_provider_chain()
-    for provider in providers:
-        try:
-            return provider(text)
-        except Exception as exc:
-            _logger.warning("Embedding provider %s failed: %s", provider.__name__, exc)
-    raise RuntimeError("All embedding providers failed")
-```
-
-**Provider implementations:**
-```python
-def _embed_via_vertex(text: str) -> list[float]:
-    """Use Vertex-Key proxy (if it supports embeddings)."""
-    from engine.config import VERTEX_API_KEY, VERTEX_BASE_URL
-    r = httpx.post(f"{VERTEX_BASE_URL}/embeddings", ...)
-    r.raise_for_status()
-    return r.json()["data"][0]["embedding"]
-
-def _embed_via_openai(text: str) -> list[float]:
-    """Use direct OpenAI API."""
-    from engine.config import OPENAI_API_KEY
-    r = httpx.post("https://api.openai.com/v1/embeddings", ...)
-    r.raise_for_status()
-    return r.json()["data"][0]["embedding"]
-
-def _embed_via_openrouter(text: str) -> list[float]:
-    """Use OpenRouter (current, may fail if key revoked)."""
+@app.get("/api/topics")
+async def list_topics(status=None, channel=None, limit=50):
     ...
-```
-
-**1.2) Update `engine/config.py`:**
-```python
-# ── Embedding providers ──────────────────────────────────────────────
-EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "auto")  # auto|openai|openrouter
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-```
-
-**1.3) Update `.env`:**
-```bash
-# Embedding — dùng provider nào có key
-EMBEDDING_PROVIDER=auto
-# OPENAI_API_KEY=sk-...  # Nếu có
-OPENROUTER_API_KEY=sk-or-v1-...  # Current (may be revoked)
-```
-
-**1.4) Graceful degradation:**
-- Khi ALL providers fail → `search_vault()` return `[]` (empty, not crash)
-- `get_context_for_topic()` return `""` → script vẫn generate được, chỉ thiếu Brain2 context
-- Log WARNING rõ ràng: "⚠️ All embedding providers offline — scripts sẽ thiếu Brain2 context"
-
-**1.5) Test: mock fallback chain:**
-```python
-# test_brain2_client.py
-def test_fallback_to_second_provider():
-    with patch("engine.brain2_client._embed_via_openrouter", side_effect=Exception("401")):
-        with patch("engine.brain2_client._embed_via_openai", return_value=[0.1]*1536):
-            result = search_vault("test query")
-            assert len(result) >= 0  # No crash
+    return {"topics": result.data, "total": len(result.data)}
 ```
 
 **Verify Stage 1:**
 ```bash
-# 1. Fallback chain exists
-grep "fallback\|provider" engine/brain2_client.py | head -5
-# MUST find provider chain logic
-
-# 2. Config has new vars
-grep "OPENAI_API_KEY\|EMBEDDING_PROVIDER" engine/config.py
-# MUST find both
-
-# 3. Brain2 graceful when all fail
-python -c "
-from engine.brain2_client import search_vault
-results = search_vault('test')
-print(f'Results: {len(results)} (0 is OK if keys missing)')
-"
-# MUST NOT crash, may return 0
-
-# 4. Tests pass
-python -m pytest tests/test_brain2_client.py -v --tb=short
+grep "localhost:5175" tpe-dashboard/src/store/shortScriptStore.ts
+grep "list_topics\|/api/topics" short-script/api.py
 ```
 
 ---
 
-#### STAGE 2: Test Artifacts Cleanup (5 phút)
+#### STAGE 2: Factory Overview Page (10 phút)
 
-**Vấn đề:** 7 test artifacts vẫn còn trong `output/scripts/`.
+**Tạo `tpe-dashboard/src/app/factory/page.tsx`:**
+- Header: "Short Script Factory" + nav buttons (Queue, Scripts, Suggestions)
+- 4 StatCards: Total Topics, Queued, Pass Rate %, Scripts
+- Topic Pipeline grid: breakdown by status
+- Script Pipeline grid: breakdown by status
+- Metrics by channel: avg QA score per channel
+- Error state: nếu API không kết nối → show banner + curl command
 
-**2.1) Xóa tất cả:**
+**Verify Stage 2:**
 ```bash
-rm -f output/scripts/test-topic_ai_*.json
+grep "fetchStats\|StatCard\|PipelineStats" tpe-dashboard/src/app/factory/page.tsx | wc -l
+# → > 5 lines
 ```
-
-**2.2) Verify:**
-```bash
-ls output/scripts/test-*.json 2>/dev/null | wc -l
-# MUST be 0
-```
-
-**2.3) Prevention — update test dispatcher to use tmpdir:**
-- Sửa `tests/test_dispatcher.py` — dùng `tmp_path` fixture thay vì `output/scripts/`
-- Hoặc add cleanup in `conftest.py`
 
 ---
 
-#### STAGE 3: Error Handling Hardening (20 phút)
+#### STAGE 3: Topic Queue Page (10 phút)
 
-**3.1) `engine/script_writer.py` — retry with exponential backoff:**
-```python
-MAX_LLM_RETRIES = 3
-RETRY_DELAYS = [2, 5, 10]  # seconds
-
-def generate_script(...) -> dict:
-    for attempt in range(MAX_LLM_RETRIES):
-        try:
-            raw = _call_llm_streaming(...)
-            script = _extract_and_validate(raw, target_factory)
-            return script
-        except ValueError as exc:
-            _logger.warning("Attempt %d/%d failed: %s", attempt+1, MAX_LLM_RETRIES, exc)
-            if attempt < MAX_LLM_RETRIES - 1:
-                time.sleep(RETRY_DELAYS[attempt])
-            else:
-                raise
-```
-
-**3.2) `worker.py` — dead letter queue:**
-Khi `process_topic` fails 3 lần:
-```python
-# Không chỉ set status='error', mà ghi chi tiết error vào script row
-client.table("tpe_scripts").update({
-    "status": "error",
-    "qa_feedback": [f"FATAL: {str(exc)}"],
-    "updated_at": datetime.now(timezone.utc).isoformat(),
-}).eq("id", script_id).execute()
-```
-
-**3.3) `cli.py` — better error messages:**
-```python
-try:
-    result = cmd_generate(args)
-except Exception as exc:
-    print(f"❌ Error: {exc}")
-    _logger.exception("Command failed")
-    return 1
-```
-
-**3.4) `engine/dispatcher.py` — verify target factory path exists:**
-```python
-def dispatch(script_id: uuid.UUID) -> str:
-    # Before dispatch, verify path exists
-    if target_factory == "doodle":
-        target_path = Path(DOODLE_FACTORY_PATH)
-        if not target_path.exists():
-            raise FileNotFoundError(f"Doodle factory path not found: {target_path}")
-```
+**Tạo `tpe-dashboard/src/app/factory/topics/page.tsx`:**
+- Add topic form: input + channel select + factory select + Queue button
+- Batch add: +1, +3, +5 sample topics
+- Filter by status + channel
+- Table: topic | channel | factory | status | source | created
+- Dispatch to `generate()` + `queueTopics()` actions
 
 **Verify Stage 3:**
 ```bash
-grep "MAX_LLM_RETRIES\|RETRY_DELAYS\|exponential" engine/script_writer.py
-grep "dead.letter\|FATAL\|qa_feedback.*error" worker.py
-python -m pytest tests/ -v --tb=short
+grep "generate\|queueTopics\|fetchTopics" tpe-dashboard/src/app/factory/topics/page.tsx | head -5
 ```
 
 ---
 
-#### STAGE 4: Dispatcher Enhancement (15 phút)
+#### STAGE 4: Scripts Page (10 phút)
 
-**4.1) Real integration — dispatch to doodle-factory:**
-Thay vì chỉ write JSON file, gọi doodle-factory CLI:
-```python
-def _dispatch_to_doodle(script: dict, script_id: str) -> str:
-    slug = _slugify(script.get("metadata", {}).get("topic", "untitled"))
-    output_path = Path(f"/Users/rio/Active/TPE/doodle-factory/input/{slug}.json")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(script, ensure_ascii=False, indent=2))
-    
-    _logger.info("Script dispatched to doodle-factory: %s", output_path)
-    return f"Dispatched to doodle-factory: {output_path}"
-```
-
-**4.2) Video factory dispatch:**
-```python
-def _dispatch_to_video(script: dict, script_id: str) -> str:
-    slug = _slugify(script.get("title", "untitled"))
-    output_path = Path(f"/Users/rio/Active/TPE/tpe-video-factory/input/{slug}.json")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(script, ensure_ascii=False, indent=2))
-    
-    _logger.info("Script dispatched to video-factory: %s", output_path)
-    return f"Dispatched to video-factory: {output_path}"
-```
-
-**4.3) Dispatch confirmation in Supabase:**
-```python
-# After dispatch, update both tables:
-client.table("tpe_scripts").update({
-    "status": "dispatched",
-    "dispatched_at": datetime.now(timezone.utc).isoformat(),
-    "dispatch_target": target_path_str,
-}).eq("id", script_id).execute()
-
-client.table("tpe_script_topics").update({
-    "status": "dispatched",
-}).eq("id", topic_id).execute()
-```
+**Tạo `tpe-dashboard/src/app/factory/scripts/page.tsx`:**
+- Card grid layout (2 columns)
+- Each card: script preview (scenes count, duration) + status badge + QA score
+- Filter by status + channel
+- QA feedback preview (max 2 items)
+- Dispatch button: appears for `qa_pass` / `approved` scripts → calls `dispatchScript()`
 
 **Verify Stage 4:**
 ```bash
-grep "dispatch_target\|dispatched_at" engine/dispatcher.py
-python -m pytest tests/test_dispatcher.py -v --tb=short
+grep "dispatchScript\|qa_score\|dispatchingId" tpe-dashboard/src/app/factory/scripts/page.tsx | head -5
 ```
 
 ---
 
-#### STAGE 5: Topic Engine — Auto Suggest (20 phút)
+#### STAGE 5: AI Suggestions Page (10 phút)
 
-**5.1) Tạo `engine/topic_engine.py`:**
-```python
-"""Topic suggestion engine — combines Brain2 + Forge + trending."""
-
-def suggest_topics(
-    channel: str = "ai",
-    count: int = 5,
-    source: str = "mixed",  # "brain2" | "forge" | "mixed"
-) -> list[dict]:
-    """Return ranked topic suggestions."""
-    topics = []
-    
-    if source in ("brain2", "mixed"):
-        brain2_topics = _extract_topics_from_brain2(channel)
-        topics.extend(brain2_topics)
-    
-    if source in ("forge", "mixed"):
-        forge_topics = _get_forge_suggestions(channel, count)
-        topics.extend(forge_topics)
-    
-    # Dedupe by topic similarity
-    unique = _dedupe_by_similarity(topics)
-    
-    # Rank by novelty (not already in tpe_script_topics)
-    ranked = _rank_by_novelty(unique)
-    
-    return ranked[:count]
-
-def _extract_topics_from_brain2(channel: str) -> list[dict]:
-    """Scan Brain2 recent notes for potential video topics."""
-    from engine.brain2_client import search_vault
-    # Search for recent high-quality content
-    queries = {
-        "ai": ["AI productivity tools", "ChatGPT tips tricks", "AI công cụ mới"],
-        "viral": ["trend viral content", "social media psychology"],
-        "tuhoc": ["personal development framework", "reading notes productivity"],
-    }
-    results = []
-    for q in queries.get(channel, []):
-        chunks = search_vault(q, match_count=3)
-        for chunk in chunks:
-            results.append({
-                "suggested_topic": chunk["title"],
-                "source": "brain2",
-                "score": chunk["similarity"] * 100,
-                "context_preview": chunk["content"][:200],
-            })
-    return results
-
-def _rank_by_novelty(topics: list[dict]) -> list[dict]:
-    """Filter out topics already generated."""
-    from engine.supabase_client import get_client
-    client = get_client()
-    existing = client.table("tpe_script_topics").select("topic").execute().data
-    existing_topics = {r["topic"].lower() for r in existing}
-    
-    return [t for t in topics if t["suggested_topic"].lower() not in existing_topics]
-```
-
-**5.2) Update `cli.py` — `suggest` subcommand:**
-```python
-# python cli.py suggest --channel ai --count 10
-# → Hiển thị ranked list, user chọn → generate
-```
-
-**5.3) Update `worker.py` — auto-suggest khi queue trống:**
-```python
-if not topic and AUTO_SUGGEST:
-    suggestions = suggest_topics(channel="ai", count=3)
-    for s in suggestions:
-        # Insert into tpe_script_topics as queued
-        client.table("tpe_script_topics").insert({
-            "topic": s["suggested_topic"],
-            "source": s["source"],
-            "channel": "ai",
-            "target_factory": "doodle",
-            "auto_mode": True,
-            "status": "queued",
-        }).execute()
-    _logger.info("Auto-suggested %d topics", len(suggestions))
-```
+**Tạo `tpe-dashboard/src/app/factory/suggestions/page.tsx`:**
+- Channel switcher (ai / viral / tuhoc)
+- List of suggestions with source icons (Brain2 🟣, Forge 🔵, Mixed 🟡)
+- Score bar + context preview
+- Multi-select: click card to toggle, then "Queue N topics"
+- Calls `queueTopics()` + refresh suggestions
 
 **Verify Stage 5:**
 ```bash
-python -c "from engine.topic_engine import suggest_topics; print('OK')"
-python cli.py suggest --help
-python -m pytest tests/ -v --tb=short
+grep "fetchSuggestions\|queueTopics\|selectedTopics" tpe-dashboard/src/app/factory/suggestions/page.tsx | head -5
 ```
 
 ---
 
-#### STAGE 6: Webhook API for Dashboard (30 phút)
+#### STAGE 6: Wire Layout Sidebar (5 phút)
 
-Tạo lightweight HTTP API cho dashboard integration.
-
-**6.1) Tạo `api.py` — FastAPI micro-server:**
-```python
-"""Short Script Factory — API for Dashboard integration."""
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
-
-app = FastAPI(title="Short Script Factory API", version="1.0")
-
-class GenerateRequest(BaseModel):
-    topic: str
-    channel: str = "ai"
-    target_factory: str = "doodle"
-    auto_dispatch: bool = False
-
-class TopicQueueRequest(BaseModel):
-    topics: list[str]
-    channel: str = "ai"
-    target_factory: str = "doodle"
-    auto_mode: bool = True
-
-@app.get("/api/status")
-async def get_status():
-    """Return pipeline status summary."""
-    from engine.metrics import get_stats_summary
-    from engine.supabase_client import get_client
-    client = get_client()
-    
-    # Topic counts
-    topics = client.table("tpe_script_topics").select("status").execute().data
-    topic_counts = {}
-    for t in topics:
-        s = t["status"]
-        topic_counts[s] = topic_counts.get(s, 0) + 1
-    
-    # Script counts
-    scripts = client.table("tpe_scripts").select("status").execute().data
-    script_counts = {}
-    for s in scripts:
-        st = s["status"]
-        script_counts[st] = script_counts.get(st, 0) + 1
-    
-    metrics = get_stats_summary()
-    
-    return {
-        "topics": topic_counts,
-        "scripts": script_counts,
-        "metrics": metrics,
-    }
-
-@app.get("/api/scripts")
-async def list_scripts(status: str = None, channel: str = None, limit: int = 20):
-    """List scripts with optional filters."""
-    from engine.supabase_client import get_client
-    client = get_client()
-    
-    query = client.table("tpe_scripts").select("*").order("created_at", desc=True).limit(limit)
-    if status:
-        query = query.eq("status", status)
-    if channel:
-        query = query.eq("channel", channel)
-    
-    result = query.execute()
-    return {"scripts": result.data, "total": len(result.data)}
-
-@app.get("/api/scripts/{script_id}")
-async def get_script(script_id: str):
-    """Get a specific script with formatted preview."""
-    from engine.supabase_client import get_client
-    from engine.formatter import format_script_for_review
-    
-    client = get_client()
-    result = client.table("tpe_scripts").select("*").eq("id", script_id).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Script not found")
-    
-    script_row = result.data[0]
-    preview = format_script_for_review(script_row["script_json"], script_row["target_factory"])
-    
-    return {
-        "script": script_row,
-        "preview": preview,
-    }
-
-@app.post("/api/generate")
-async def generate_script_endpoint(req: GenerateRequest):
-    """Trigger script generation (async via queue)."""
-    from engine.supabase_client import get_client
-    client = get_client()
-    
-    topic_row = client.table("tpe_script_topics").insert({
-        "topic": req.topic,
-        "source": "api",
-        "channel": req.channel,
-        "target_factory": req.target_factory,
-        "auto_mode": req.auto_dispatch,
-        "status": "queued",
-    }).execute().data[0]
-    
-    return {
-        "message": "Topic queued for generation",
-        "topic_id": topic_row["id"],
-        "status": "queued",
-    }
-
-@app.post("/api/queue")
-async def queue_topics(req: TopicQueueRequest):
-    """Batch queue multiple topics."""
-    from engine.supabase_client import get_client
-    client = get_client()
-    
-    inserted = []
-    for topic in req.topics:
-        row = client.table("tpe_script_topics").insert({
-            "topic": topic,
-            "source": "api",
-            "channel": req.channel,
-            "target_factory": req.target_factory,
-            "auto_mode": req.auto_mode,
-            "status": "queued",
-        }).execute().data[0]
-        inserted.append(row["id"])
-    
-    return {
-        "message": f"Queued {len(inserted)} topics",
-        "topic_ids": inserted,
-    }
-
-@app.post("/api/dispatch/{script_id}")
-async def dispatch_script(script_id: str):
-    """Dispatch a script to its target factory."""
-    import uuid
-    from engine.dispatcher import dispatch
-    
-    try:
-        result = dispatch(uuid.UUID(script_id))
-        return {"message": result}
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-@app.get("/api/suggestions")
-async def get_suggestions(channel: str = "ai", count: int = 5):
-    """Get topic suggestions from Brain2 + Forge."""
-    from engine.topic_engine import suggest_topics
-    topics = suggest_topics(channel=channel, count=count)
-    return {"suggestions": topics}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5175)
-```
-
-**6.2) Update `requirements.txt`:**
-```
-fastapi>=0.109.0
-uvicorn>=0.27.0
-pydantic>=2.0.0
-```
-
-**6.3) CORS cho Dashboard:**
-```python
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5174", "http://localhost:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+**Update `tpe-dashboard/src/app/layout.tsx`:**
+```tsx
+import { Zap } from 'lucide-react';
+<Link href="/factory" className="flex items-center gap-3 ...">
+  <Zap size={20} className="text-[#c9a227]" />
+  Script Factory
+</Link>
 ```
 
 **Verify Stage 6:**
 ```bash
-# Install deps
-pip install fastapi uvicorn pydantic
-
-# Test import
-python -c "from api import app; print('OK')"
-
-# Start server briefly
-timeout 5 python api.py &
-sleep 2 && curl -s http://localhost:5175/api/status | python -m json.tool
-# Should return JSON with topics/scripts/metrics
-
-python -m pytest tests/ -v --tb=short
+grep "factory\|Zap" tpe-dashboard/src/app/layout.tsx
 ```
 
 ---
 
-#### STAGE 7: launchctl Service (10 phút)
+#### STAGE 7: Build Verification + API Test (10 phút)
 
-**7.1) Tạo `scripts/com.tpe.script-worker.plist`:**
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.tpe.script-worker</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/rio/Active/TPE/short-script/venv/bin/python</string>
-        <string>/Users/rio/Active/TPE/short-script/worker.py</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/rio/Active/TPE/short-script</string>
-    <key>KeepAlive</key>
-    <true/>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/rio/Active/TPE/short-script/logs/worker.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/rio/Active/TPE/short-script/logs/worker.error.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin</string>
-    </dict>
-</dict>
-</plist>
+**7.1) Dashboard build:**
+```bash
+cd tpe-dashboard && npm run build
+# → 0 TypeScript errors, 5 factory routes registered
 ```
 
-**7.2) Tạo `scripts/com.tpe.script-api.plist` cho API server.**
-
-**7.3) Tạo `scripts/install.sh`:**
+**7.2) API smoke test:**
 ```bash
-#!/bin/bash
-mkdir -p /Users/rio/Active/TPE/short-script/logs
-cp scripts/com.tpe.script-worker.plist ~/Library/LaunchAgents/
-cp scripts/com.tpe.script-api.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.tpe.script-worker.plist
-launchctl load ~/Library/LaunchAgents/com.tpe.script-api.plist
-echo "✅ Services installed"
+cd short-script && source venv/bin/activate
+timeout 3 python api.py &
+sleep 2
+curl -s http://localhost:5175/api/status | python -m json.tool
+curl -s http://localhost:5175/api/topics | python -m json.tool
+```
+
+**7.3) Verify API still passes tests:**
+```bash
+cd short-script && python -m pytest tests/ -v --tb=short | tail -5
+# → 118 tests PASS
 ```
 
 **Verify Stage 7:**
 ```bash
-test -f scripts/com.tpe.script-worker.plist && echo "OK" || echo "MISSING"
-test -f scripts/com.tpe.script-api.plist && echo "OK" || echo "MISSING"
-test -f scripts/install.sh && echo "OK" || echo "MISSING"
+# Route list from build output:
+grep "factory" <(npm run build 2>&1)
+# Expect: /factory, /factory/scripts, /factory/suggestions, /factory/topics
 ```
 
 ---
 
-#### STAGE 8: Git Init + First Commit (5 phút)
+#### STAGE 8: Handoff Update (5 phút)
 
+**Update `.claude/handoff.md`:**
+- Mark Task 5 complete ✅
+- Update version to v3.1
+- Add result entry in KẾT QUẢ PHIÊN
+- Remove fake Task 5 description (copy-paste from Task 4)
+- Note: ALL 5 previous tasks still marked complete ✅
+
+---
+
+### Acceptance Criteria Task 5:
+
+| # | Criteria | Verify |
+|---|---------|--------|
+| AC-71 | `shortScriptStore.ts` exists | `test -f tpe-dashboard/src/store/shortScriptStore.ts` |
+| AC-72 | Store connects to port 5175 | `grep "5175" tpe-dashboard/src/store/shortScriptStore.ts` |
+| AC-73 | `/factory` page exists | `test -f tpe-dashboard/src/app/factory/page.tsx` |
+| AC-74 | `/factory/topics` page exists | `test -f tpe-dashboard/src/app/factory/topics/page.tsx` |
+| AC-75 | `/factory/scripts` page exists | `test -f tpe-dashboard/src/app/factory/scripts/page.tsx` |
+| AC-76 | `/factory/suggestions` page exists | `test -f tpe-dashboard/src/app/factory/suggestions/page.tsx` |
+| AC-77 | Layout has Script Factory nav link | `grep "factory" tpe-dashboard/src/app/layout.tsx` |
+| AC-78 | Dashboard build succeeds | `npm run build` → 0 TypeScript errors |
+| AC-79 | short-script tests still pass | `pytest tests/ -q` → 118 PASS |
+| AC-80 | API `/api/topics` endpoint works | `curl /api/topics` → JSON |
+| AC-81 | handoff.md Task 5 marked ✅ | `grep "Task 5.*COMPLETED" handoff.md` |
+
+---
+
+### Ghi chú từ Antigravity (Task 5):
+
+1. **Dashboard đang dùng LangGraph (port 8000)** — Script Factory (port 5175) chạy độc lập, KHÔNG conflict. Hai hệ thống song song.
+
+2. **Worker chạy độc lập** — Worker polls Supabase mỗi 30s. Dashboard chỉ quản lý queue, không can thiệp worker.
+
+3. **CORS đã set cho port 5174** — `short-script/api.py` CORS middleware cho `http://localhost:5174`.
+
+4. **Next step potential**: Hỏi Antigravity xem có muốn gộp Script Factory vào Kanban board chính (thêm 1 column mới "Script Factory") hay giữ riêng navigation.
+
+---
+
+## ⚡ TASK TIẾP THEO
+
+### 🔲 Task 6: Production Hardening + Dashboard Polish + Final E2E
+**Giao bởi:** Antigravity | **Ngày:** 2026-04-08
+**Priority:** 🟡 HIGH
+**Estimated:** ~2 hours total
+
+**Mô tả:**
+Task 4+5 hoàn thành code-level. Task 6 polish production: git commit Task 5 changes, fix test artifact leak, dashboard UX improvements, worker/API service verify, comprehensive E2E pipeline test. Mục tiêu cuối: system sẵn sàng chạy production tự động.
+
+**Build Order:**
+
+---
+
+#### STAGE 1: Git Commit Task 5 (5 phút)
+
+**1.1) Commit short-script changes:**
 ```bash
 cd /Users/rio/Active/TPE/short-script
-git init
 git add -A
-git commit -m "feat: Short Script Factory v2.0 — core engine + Brain2 RAG + CLI + worker + API
+git commit -m "feat: Task 5 — /api/topics endpoint + cleanup
 
-- 10 engine modules (brain2, config, db, dispatcher, forge, formatter, metrics, qa, writer, supabase)
-- CLI with 8 subcommands (generate, qa, dispatch, status, list-topics, run, batch, show, suggest)
-- Worker daemon with auto-mode, FOR UPDATE SKIP LOCKED, graceful shutdown
-- FastAPI webhook API for dashboard integration
-- Multi-channel prompts (ai, viral, tuhoc)
-- QA pipeline with 5-dimension scoring + Voice DNA auto-fail
-- 100+ tests ALL PASS
-
-Co-authored-by: Antigravity <antigravity@deepmind.google>
-Co-authored-by: Claude Code <claude@anthropic.com>"
+- Added GET /api/topics endpoint with status/channel filtering
+- Cleaned orphaned handoff specs
+- Updated handoff status to Task 5 complete"
 ```
 
-**Verify Stage 8:**
+**1.2) Commit dashboard changes:**
 ```bash
-git log --oneline -1
-git status
-# Should be clean
+cd /Users/rio/Active/TPE/tpe-dashboard
+git add -A
+git commit -m "feat: Script Factory dashboard integration
+
+- shortScriptStore.ts — Zustand store connecting to short-script API (port 5175)
+- /factory — Overview with StatCards, pipeline metrics
+- /factory/topics — Queue management, add/batch topic forms
+- /factory/scripts — Script list with QA scores, dispatch buttons
+- /factory/suggestions — AI topic suggestions with channel switcher
+- Layout sidebar — Added Script Factory nav link"
+```
+
+**Verify Stage 1:**
+```bash
+cd /Users/rio/Active/TPE/short-script && git status  # clean
+cd /Users/rio/Active/TPE/tpe-dashboard && git status  # clean
 ```
 
 ---
 
-#### STAGE 9: Documentation (15 phút)
+#### STAGE 2: Test Artifact Prevention (10 phút)
 
-**9.1) Tạo `README.md`:**
-```markdown
-# Short Script Factory
+**Vấn đề:** E2E tests keep creating files in `output/scripts/` that pollute production.
 
-Nhà máy sản xuất kịch bản video ngắn tự động — phần nguyên liệu đầu vào cho TPE Video Factory + Doodle Factory.
-
-## Architecture
-- **CLI**: `python cli.py [command]` — manual control
-- **Worker**: `python worker.py` — auto-mode daemon
-- **API**: `python api.py` — webhook for Dashboard (port 5175)
-
-## Commands
-| Command | Description |
-|---------|-------------|
-| `generate` | Generate 1 script |
-| `batch` | Batch generate from Forge/file |
-| `qa` | Score existing script |
-| `dispatch` | Send to Video/Doodle factory |
-| `run` | Full pipeline (generate → QA → dispatch) |
-| `status` | Show stats |
-| `suggest` | AI topic suggestions |
-| `show` | Pretty-print a script |
-
-## Channels
-- `ai` — AI & Công nghệ
-- `viral` — Viral entertainment
-- `tuhoc` — Tự học & Phát triển bản thân
-
-## Setup
-\`\`\`bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env  # Edit with your keys
-\`\`\`
-
-## QA Scoring
-5 dimensions × 20 points = 100 max
-- Structure, Voice DNA, Hook, Content Depth, Format Compliance
-- AUTO-FAIL: colon (`:`) or em-dash (`—`) in narration
-- Pass threshold: ≥ 75/100
-```
-
-**9.2) Tạo `.env.example`:**
-```bash
-# LLM
-VERTEX_API_KEY=your-vertex-key
-VERTEX_BASE_URL=https://omega.vertex-key.com/v1
-MODEL_WRITER=claude-sonnet-4-6
-MODEL_QA=gemini-2.0-flash
-
-# Supabase
-SUPABASE_URL=https://bksqlgwotvpabksnynbo.supabase.co
-SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_KEY=your-service-key
-
-# Supabase Postgres (direct pgvector)
-SUPABASE_DB_HOST=aws-1-ap-southeast-1.pooler.supabase.com
-SUPABASE_DB_PORT=5432
-SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres.bksqlgwotvpabksnynbo
-SUPABASE_DB_PASSWORD=your-db-password
-
-# Embedding providers (fallback: openai → openrouter)
-EMBEDDING_PROVIDER=auto
-OPENAI_API_KEY=
-OPENROUTER_API_KEY=
-```
-
-**Verify Stage 9:**
-```bash
-test -f README.md && echo "OK" || echo "MISSING"
-test -f .env.example && echo "OK" || echo "MISSING"
-wc -l README.md
-# Should be ≥ 50 lines
-```
-
----
-
-#### STAGE 10: Integration Tests + E2E Re-verify (20 phút)
-
-**10.1) `tests/test_api.py` — FastAPI endpoint tests:**
+**2.1) Tạo `tests/conftest.py` — auto-cleanup fixture:**
 ```python
-from fastapi.testclient import TestClient
-from api import app
+import pytest
+from pathlib import Path
 
-client = TestClient(app)
-
-def test_status_endpoint():
-    resp = client.get("/api/status")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "topics" in data
-    assert "scripts" in data
-
-def test_list_scripts():
-    resp = client.get("/api/scripts")
-    assert resp.status_code == 200
-
-def test_generate_queues_topic():
-    resp = client.post("/api/generate", json={
-        "topic": "Test Topic",
-        "channel": "ai",
-        "target_factory": "doodle",
-    })
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "queued"
-
-def test_suggestions():
-    resp = client.get("/api/suggestions?channel=ai&count=3")
-    assert resp.status_code == 200
+@pytest.fixture(autouse=True)
+def clean_test_outputs():
+    """Auto-cleanup test artifacts after each test."""
+    yield
+    # After test: remove any test-* files from output/
+    output_dir = Path(__file__).parent.parent / "output" / "scripts"
+    for f in output_dir.glob("test-*.json"):
+        f.unlink()
 ```
 
-**10.2) `tests/test_topic_engine.py`:**
-```python
-def test_suggest_topics_returns_list()
-def test_suggest_topics_empty_channel()
-def test_rank_by_novelty_filters_existing()
-def test_dedupe_removes_similar()
-```
+**2.2) Update `engine/dispatcher.py` — use tmp_path in tests:**
+Ensure dispatcher tests use `tmp_path` pytest fixture, NOT `output/scripts/`.
 
-**10.3) E2E re-verify (nếu embedding works):**
-```bash
-# Only if OPENAI_API_KEY or working OPENROUTER key exists:
-python cli.py run --topic "Tại Sao Tui Dùng AI Mỗi Ngày" --channel ai --target doodle
-# Log: scenes, QA score, pass/fail
-```
-
-**Verify Stage 10:**
+**2.3) Verify:**
 ```bash
 python -m pytest tests/ -v --tb=short
-# Target: 115+ tests, ALL PASS
+ls output/scripts/test-*.json 2>/dev/null | wc -l
+# MUST be 0
 ```
 
 ---
 
-#### STAGE 11: Worker Improvements (15 phút)
+#### STAGE 3: Dashboard Visual Polish (30 phút)
 
-**11.1) Health check endpoint on worker:**
-```python
-# worker.py thêm health endpoint dùng threading
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+**3.1) `/factory` Overview page:**
+- Verify StatCards show live data from API
+- Ensure dark theme consistency (bg-slate-900, text-slate-100)
+- Add refresh button + auto-refresh every 30s
+- Add link to each sub-page from stat cards
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'{"status": "running"}')
+**3.2) `/factory/topics` page:**
+- Add topic form: textarea + channel selector + target factory selector
+- "Add Topic" button → POST /api/generate
+- Table: columns (topic, channel, target, status, created_at)
+- Status badge colors: queued=yellow, generating=blue, approved=green, error=red
 
-def _start_health_server(port=5176):
-    server = HTTPServer(("", port), HealthHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    _logger.info("Health endpoint: http://localhost:%d", port)
-```
+**3.3) `/factory/scripts` page:**
+- Card grid layout (not table)
+- Each card: title, QA score (color-coded), channel badge, dispatch button
+- Score coloring: ≥90=green, 75-89=yellow, <75=red
+- Modal/expandable to show formatted script preview (from API)
 
-**11.2) Worker stats in tpe_settings:**
-```python
-# Sau mỗi cycle, update:
-# - worker_last_seen: timestamp
-# - worker_processed_total: int
-# - worker_errors_total: int
-# - worker_avg_gen_time: float
-```
+**3.4) `/factory/suggestions` page:**
+- Channel tabs (ai, viral, tuhoc)
+- Suggestion cards: topic title, source icon (🧠 Brain2, 🔥 Forge), score
+- Multi-select + "Queue All" button → POST /api/queue
+- Loading skeleton when fetching
 
-**11.3) Rate limiting — max N scripts per hour:**
-```python
-MAX_PER_HOUR = int(os.getenv("WORKER_MAX_PER_HOUR", "10"))
-# Track with rolling window
-```
+**3.5) Layout improvements:**
+- Active page highlight in sidebar nav
+- Breadcrumb on factory sub-pages
 
-**Verify Stage 11:**
+**Verify Stage 3:**
 ```bash
-grep "health\|MAX_PER_HOUR\|rate.limit" worker.py
+cd /Users/rio/Active/TPE/tpe-dashboard
+npm run build  # 0 errors
+npm run dev &  # Start on 5174
+# Manual check: navigate /factory, /factory/topics, etc.
+```
+
+---
+
+#### STAGE 4: API Improvements (15 phút)
+
+**4.1) Add POST /api/generate test with live curl:**
+```bash
+curl -X POST http://localhost:5175/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "Test Factory Flow", "channel": "ai", "target_factory": "doodle"}' | python -m json.tool
+# Should return: {topic_id, status: "queued"}
+```
+
+**4.2) Add GET /api/scripts/{id} formatted preview:**
+Ensure the preview field uses `format_script_for_review()` correctly.
+
+**4.3) Add PATCH /api/scripts/{id}/approve endpoint:**
+```python
+@app.patch("/api/scripts/{script_id}/approve")
+async def approve_script(script_id: str):
+    """Approve a script and optionally dispatch."""
+    client = get_client()
+    client.table("tpe_scripts").update({
+        "status": "approved",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", script_id).execute()
+    return {"message": "Script approved"}
+```
+
+**4.4) Error handling middleware:**
+```python
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"error": str(exc), "type": type(exc).__name__}
+    )
+```
+
+**Verify Stage 4:**
+```bash
+python -m pytest tests/test_api.py -v --tb=short
+```
+
+---
+
+#### STAGE 5: Worker Service Verify (10 phút)
+
+**5.1) Test worker --once --dry-run:**
+```bash
+cd /Users/rio/Active/TPE/short-script
+source venv/bin/activate
+python worker.py --once --dry-run
+# Should exit cleanly, log no topics found
+```
+
+**5.2) Test health endpoint:**
+```bash
+python worker.py &
+sleep 3
+curl -s http://localhost:5176
+# Should return: {"status": "running"}
+kill %1
+```
+
+**5.3) Verify launchctl plists are valid XML:**
+```bash
+plutil -lint scripts/com.tpe.script-worker.plist
+plutil -lint scripts/com.tpe.script-api.plist
+# Both should say "OK"
+```
+
+**Verify Stage 5:**
+```bash
 python -m pytest tests/test_worker.py -v --tb=short
 ```
 
 ---
 
-#### STAGE 12: Final Verification + Report (10 phút)
+#### STAGE 6: E2E Pipeline Smoke Test (20 phút)
 
-**12.1) Full regression:**
+**Full pipeline test (API → Worker → QA → Dispatch):**
+
+**6.1) Start API:**
+```bash
+python api.py &  # port 5175
+```
+
+**6.2) Queue topic via API:**
+```bash
+curl -X POST http://localhost:5175/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "5 Thói Quen Dùng AI Sai Mà Tui Từng Mắc","channel":"ai","target_factory":"doodle","auto_dispatch":false}'
+# Note the topic_id
+```
+
+**6.3) Run worker once:**
+```bash
+python worker.py --once
+# Should pick up the queued topic, generate script, QA score it
+```
+
+**6.4) Check results:**
+```bash
+curl -s http://localhost:5175/api/status | python -m json.tool
+curl -s http://localhost:5175/api/scripts?limit=1 | python -m json.tool
+python cli.py status
+```
+
+**6.5) If QA pass, test dispatch:**
+```bash
+python cli.py dispatch --script-id <script_id>
+# Or: curl -X POST http://localhost:5175/api/dispatch/<script_id>
+```
+
+**Verify Stage 6:**
+- Script generated with valid JSON schema
+- QA score ≥ 75/100
+- No colon (`:`) or em-dash (`—`) in narration
+- Dispatch writes file to correct factory path
+
+---
+
+#### STAGE 7: Final Verification + Git (10 phút)
+
+**7.1) Full regression:**
 ```bash
 python -m pytest tests/ -v --tb=short
-# ALL PASS, 115+ tests
+# ALL PASS, 118+ tests
 ```
 
-**12.2) Security audit:**
+**7.2) Security audit:**
 ```bash
 grep -rn "Brain2_02031988\|sk-or-v1\|password=" engine/ worker.py cli.py api.py --include="*.py" | grep -v "from engine.config\|from engine.db\|SUPABASE_DB_PASSWORD"
-# MUST return EMPTY (only references to config vars OK)
+# MUST return EMPTY
 ```
 
-**12.3) File structure audit:**
+**7.3) Final commit:**
 ```bash
-find . -type f -not -path "*/venv/*" -not -path "*/.git/*" -not -path "*/__pycache__/*" -not -path "*/.pytest_cache/*" -not -path "*/.claude/*" | sort
+cd /Users/rio/Active/TPE/short-script
+git add -A
+git commit -m "chore: Task 6 — production hardening + test cleanup + API polish"
 ```
 
-**12.4) API smoke test:**
+**7.4) Dashboard final commit:**
 ```bash
-timeout 5 python api.py &
-sleep 2
-curl -s http://localhost:5175/api/status | python -m json.tool
-curl -s http://localhost:5175/api/scripts?limit=3 | python -m json.tool
-curl -s http://localhost:5175/api/suggestions?channel=ai | python -m json.tool
-```
-
-**12.5) DB state check:**
-```bash
-python cli.py status
+cd /Users/rio/Active/TPE/tpe-dashboard
+git add -A
+git commit -m "polish: Script Factory UX improvements"
 ```
 
 ---
 
-### Acceptance Criteria Task 4:
+### Acceptance Criteria Task 6:
 
 | # | Criteria | Verify |
 |---|---------|--------|
-| AC-49 | Embedding fallback chain exists | `grep "fallback\|provider_chain" engine/brain2_client.py` |
-| AC-50 | search_vault graceful when all fail | `python -c "..."` → no crash, returns [] |
-| AC-51 | Zero test artifacts | `ls output/scripts/test-*.json \| wc -l` → 0 |
-| AC-52 | LLM retry with backoff | `grep "RETRY_DELAYS\|MAX_LLM_RETRIES" engine/script_writer.py` |
-| AC-53 | Dispatcher writes to factory input/ | `grep "input/" engine/dispatcher.py` |
-| AC-54 | topic_engine.py exists | `python -c "from engine.topic_engine import suggest_topics"` |
-| AC-55 | `suggest` CLI subcommand | `python cli.py suggest --help` |
-| AC-56 | api.py with FastAPI | `python -c "from api import app"` |
-| AC-57 | GET /api/status works | curl test |
-| AC-58 | POST /api/generate works | curl test |
-| AC-59 | GET /api/scripts works | curl test |
-| AC-60 | GET /api/suggestions works | curl test |
-| AC-61 | launchctl plists exist | `test -f scripts/com.tpe.script-worker.plist` |
-| AC-62 | Git initialized | `git log --oneline -1` |
-| AC-63 | README.md exists (≥50 lines) | `wc -l README.md` |
-| AC-64 | .env.example exists | `test -f .env.example` |
-| AC-65 | API tests exist | `python -m pytest tests/test_api.py -v` |
-| AC-66 | topic_engine tests exist | `python -m pytest tests/test_topic_engine.py -v` |
-| AC-67 | Worker health check | `grep "health\|HealthHandler" worker.py` |
-| AC-68 | Worker rate limiting | `grep "MAX_PER_HOUR" worker.py` |
-| AC-69 | 115+ tests ALL PASS | `python -m pytest tests/ -v` |
-| AC-70 | Zero print() in engine/ | `grep -rn "print(" engine/ --include="*.py" \| grep -v "#"` → EMPTY |
+| AC-82 | Git clean (short-script) | `git status` → clean |
+| AC-83 | Git clean (tpe-dashboard) | `git status` → clean |
+| AC-84 | conftest.py cleanup fixture | `test -f tests/conftest.py` |
+| AC-85 | Zero test artifacts after test run | `pytest && ls output/scripts/test-*.json \| wc -l` → 0 |
+| AC-86 | Dashboard build passes | `npm run build` → 0 errors |
+| AC-87 | StatCards show live data | Manual verify on /factory |
+| AC-88 | Topics page add form works | Manual verify on /factory/topics |
+| AC-89 | PATCH /api/scripts/{id}/approve | curl test |
+| AC-90 | Worker --once --dry-run clean | Exit 0 |
+| AC-91 | Worker health endpoint | curl localhost:5176 |
+| AC-92 | launchctl plists valid | `plutil -lint` → OK |
+| AC-93 | E2E: queue → generate → QA → result | Full pipeline |
+| AC-94 | 118+ tests ALL PASS | `pytest` |
+| AC-95 | Zero hardcoded secrets | `grep` → EMPTY |
 
 ### Ghi chú từ Antigravity:
 
-1. **STAGE 1 (Embedding fix) LÀ #1 PRIORITY** — OpenRouter key 401, Brain2 RAG không hoạt động. Triển khai fallback chain.
+1. **Git commit TRƯỚC khi bắt đầu sửa** — commit Task 5 changes first (Stage 1), rồi mới sửa code.
 
-2. **FastAPI PHẢI có CORS** — Dashboard ở port 5174, API ở 5175. Cross-origin bắt buộc.
+2. **Dashboard KHÔNG import từ short-script** — chỉ gọi API qua HTTP. Zustand store ở `shortScriptStore.ts`.
 
-3. **Dispatcher đường dẫn:**
-   - Doodle: `/Users/rio/Active/TPE/doodle-factory/input/`
-   - Video: `/Users/rio/Active/TPE/tpe-video-factory/input/`
-   - CẨN THẬN: chỉ write file, KHÔNG import code từ factory.
+3. **E2E test phụ thuộc vào embedding** — nếu OpenRouter vẫn 401, script vẫn generate được nhưng THIẾU Brain2 context. Log warning OK.
 
-4. **Git commit PHẢI có message chi tiết** — liệt kê tất cả modules và features.
+4. **Worker health port 5176** — khác API (5175) và Dashboard (5174).
 
-5. **tests/ folder KHÔNG dùng `output/scripts/`** — dùng `tmp_path` pytest fixture.
-
-6. **API server port 5175** — không trùng với Dashboard (5174) hay Forge (5172).
-
-7. **Worker health endpoint port 5176** — cho monitoring.
-
-8. **EMBEDDING_PROVIDER=auto** — try all providers, ngừng ở provider đầu tiên thành công.
-
-9. **KHÔNG NÓI "XONG"** nếu chưa:
-   - 115+ tests ALL PASS
-   - API smoke test pass (curl /api/status)
-   - Git initialized + clean commit
-   - Zero test artifacts in output/
-
+5. **KHÔNG NÓI "XONG"** nếu chưa:
+   - 118+ tests ALL PASS
+   - Git clean cả 2 repos
+   - Zero test artifacts
+   - launchctl plists valid
 
 ---
 
 ## 📝 KẾT QUẢ PHIÊN
+
+### [2026-04-08 10:15] — Claude Code: Task 5 COMPLETED ✅
+**Status:** ✅ Hoàn thành Task 5 (Dashboard Integration)
+**Ai ghi:** Claude Code
+
+**Đã làm:**
+
+**STAGE 1 — Dashboard Architecture Analysis:**
+- Đọc `tpe-dashboard`: kanbanStore.ts (port 8000, LangGraph), layout.tsx (sidebar nav), types.ts, review page
+- Xác định scope thật: kết nối short-script API (port 5175) vào dashboard
+- Tạo `tpe-dashboard/src/store/shortScriptStore.ts` — Zustand store, API_BASE=`localhost:5175/api`
+- Thêm `/api/topics` endpoint vào `short-script/api.py`
+
+**STAGE 2-5 — Factory Pages (4 pages):**
+- `/factory` — Overview với StatCards, Topic/Script pipeline breakdown, metrics by channel
+- `/factory/topics` — Queue management: add topic form, batch add, table với filter
+- `/factory/scripts` — Script list: card grid, QA score, feedback preview, dispatch button
+- `/factory/suggestions` — AI suggestions: channel switcher, source icons, multi-select queue
+
+**STAGE 6 — Layout Wired:**
+- Sidebar nav: `<Link href="/factory">` với Zap icon + "Script Factory" label
+
+**STAGE 7 — Verification:**
+- `npm run build` → **0 TypeScript errors**, 5 factory routes registered ✅
+- `pytest tests/ -q` → **118 tests ALL PASS** ✅
+- `curl /api/topics` → new endpoint works ✅
+
+**Acceptance Criteria Task 5:**
+- [x] AC-71: shortScriptStore.ts exists ✅
+- [x] AC-72: Store connects to port 5175 ✅
+- [x] AC-73: /factory page exists ✅
+- [x] AC-74: /factory/topics page exists ✅
+- [x] AC-75: /factory/scripts page exists ✅
+- [x] AC-76: /factory/suggestions page exists ✅
+- [x] AC-77: Layout has Script Factory nav link ✅
+- [x] AC-78: Dashboard build succeeds ✅ (0 TypeScript errors)
+- [x] AC-79: short-script tests still pass ✅ (118 PASS)
+- [x] AC-80: API /api/topics works ✅
+- [x] AC-81: handoff.md Task 5 marked ✅
+
+**Files created/changed:**
+- `tpe-dashboard/src/store/shortScriptStore.ts` (NEW)
+- `tpe-dashboard/src/app/factory/page.tsx` (NEW)
+- `tpe-dashboard/src/app/factory/topics/page.tsx` (NEW)
+- `tpe-dashboard/src/app/factory/scripts/page.tsx` (NEW)
+- `tpe-dashboard/src/app/factory/suggestions/page.tsx` (NEW)
+- `tpe-dashboard/src/app/layout.tsx` (ADDED Zap nav link)
+- `short-script/api.py` (ADDED /api/topics endpoint)
+- `short-script/.claude/handoff.md` (UPDATED)
+
+**Ghi chú cho Antigravity:**
+- Dashboard build clean — 5 factory routes đăng ký, 0 TypeScript errors
+- short-script vẫn 118 tests ALL PASS — không break gì
+- Có thể gộp Script Factory vào Kanban board chính (thêm column) nếu muốn
+
+---
 
 ### [2026-04-08 09:15] — Claude Code: Task 4 COMPLETED ✅
 **Status:** ✅ Hoàn thành Task 4 (Embedding Resilience + API + Production Polish)
