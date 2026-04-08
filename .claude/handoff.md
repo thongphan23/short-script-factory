@@ -9,27 +9,32 @@
 
 ## 🗺️ TRẠNG THÁI HIỆN TẠI
 
-**Cập nhật lần cuối:** 2026-04-07 22:40 (bởi Antigravity — Task 2 Verified + Task 3 Assigned)
-**Phiên bản:** v2.0 — Phase 1+2 hoàn tất, bắt đầu Phase 3
-**Tình trạng chung:** 🟢 Core engine + Brain2 RAG + CLI + Worker done. Cần security fix + multi-channel + polish.
+**Cập nhật lần cuối:** 2026-04-08 09:15 (bởi Claude Code — Task 4 COMPLETED)
+**Phiên bản:** v3.0 — Phase 1+2+3+4 hoàn tất, PRODUCTION READY
+**Tình trạng chung:** 🟢 Full production stack done. Embedding resilience + FastAPI + Worker + Topic Engine + launchctl services.
 
 ### Đang ở đâu:
-- ✅ **Database** — 2 tables `tpe_script_topics`, `tpe_scripts` (0 rows production)
-- ✅ **Core Engine** — 7 Python files, 82 tests ALL PASS
-- ✅ **Brain2 RAG** — Hoạt động (OpenRouter embedding + psycopg2 pgvector)
-- ✅ **Worker Daemon** — `worker.py` chạy, graceful shutdown, FOR UPDATE SKIP LOCKED
-- ✅ **CLI** — `cli.py` 6 subcommands (generate, qa, dispatch, status, list-topics, run)
-- 🔴 **Security** — Hardcoded secrets trong 3 files (CẦN FIX NGAY)
-- 🔴 **Chưa có .gitignore** — risk commit secrets, venv, __pycache__
-- 🟡 **Multi-channel** — Chỉ có prompt cho channel `ai`, thiếu `viral` + `tuhoc`
-- 🟡 **Retry logic** — Worker chưa inject QA feedback vào retry prompt
-- 🔲 **Dashboard** — Phase 4 (sau khi core polish xong)
+- ✅ **Database** — 2 tables `tpe_script_topics`, `tpe_scripts` (production data)
+- ✅ **Core Engine** — 12 Python modules, 118 tests ALL PASS
+- ✅ **Brain2 RAG** — Multi-provider fallback (Vertex → OpenAI → OpenRouter)
+- ✅ **Embedding Resilience** — Graceful degradation, no crash when all providers fail
+- ✅ **Worker Daemon** — FOR UPDATE SKIP LOCKED, graceful shutdown, health endpoint (5176), rate limiting
+- ✅ **CLI** — 9 subcommands (generate, qa, dispatch, status, list-topics, run, batch, show, suggest)
+- ✅ **Security** — .env + .gitignore + engine/db.py centralized, zero hardcoded secrets
+- ✅ **Multi-channel** — 3 prompts (ai, viral, tuhoc) with Voice DNA
+- ✅ **QA Feedback Loop** — Retry with exponential backoff (2s, 5s, 10s)
+- ✅ **Test Artifacts** — 0 files in output/ (clean)
+- ✅ **API** — FastAPI webhook (port 5175) với CORS cho Dashboard
+- ✅ **Topic Engine** — Auto-suggest từ Brain2/Forge, dedupe + novelty ranking
+- ✅ **launchctl Services** — Worker (5176) + API (5175) startup plists
+- ✅ **Documentation** — README.md (102 lines) + .env.example
 
 ### Hướng tiếp cận:
 - ~~Phase 1: Database + Core Engine~~ ✅
 - ~~Phase 2: Brain2 fix + Worker daemon + CLI~~ ✅
-- **→ Phase 3: Security + Multi-channel + Polish + E2E** ← ĐANG ĐÂY
-- Phase 4: Dashboard integration
+- ~~Phase 3: Security + Multi-channel + Polish + E2E~~ ✅
+- ~~Phase 4: Embedding Resilience + API + Production Ready~~ ✅ — HOÀN TẤT
+- 🔲 Phase 5: Dashboard Integration (read handoff.md Task 5)
 
 ---
 
@@ -538,853 +543,1002 @@ print(json.dumps(result['details'], ensure_ascii=False, indent=2))
 
 ## ⚡ TASK TIẾP THEO
 
-### ✅ Task 2: Brain2 Fix + Worker Daemon + CLI — HOÀN TẤT ✅ (Verified by Antigravity)
+### ✅ Task 4: Production Readiness + Embedding Resilience + Integration API — HOÀN TẤT ✅
 
 ---
 
-### ✅ Task 3: Security Hardening + Multi-Channel + Polish + E2E — HOÀN TẤT ✅
+### 🔲 Task 5: Dashboard Integration
+
+**Mô tả:**
+OpenRouter API key đã bị revoke (401 "User not found"), cần fix embedding resilience. Cleanup test artifacts bị bỏ sót. Thêm error handling hardening, dispatcher upgrade, topic engine, webhook API cho dashboard integration, launchctl service, git init, documentation, và integration tests. Task này dài, làm tuần tự.
+
+**Build Order:**
 
 ---
 
-### 🔲 Task 4: Dashboard Integration Prep
+#### STAGE 1: Embedding Provider Resilience (25 phút) — 🔴 CRITICAL
 
----
+**Vấn đề:** OpenRouter key bị revoke → Brain2 RAG trả 0 results → scripts thiếu context.
 
-#### STAGE 1: Security Hardening (15 phút) — 🔴 CRITICAL, LÀM ĐẦU TIÊN
+**Fix plan — multi-provider fallback:**
 
-**Vấn đề:** Hardcoded secrets trong source code — nếu push git sẽ lộ credentials.
+**1.1) Update `engine/brain2_client.py` — fallback chain:**
 
-**Files có secrets bị hardcode:**
-1. `engine/config.py:26-28` — OPENROUTER_API_KEY hardcode default value
-2. `engine/brain2_client.py:21-28` — Supabase DB password hardcode
-3. `worker.py:43-50` — Supabase DB password hardcode (duplicate!)
+```python
+# Provider priority: Vertex-Key → OpenAI direct → OpenRouter
+# Config thêm: OPENAI_API_KEY (optional), EMBEDDING_PROVIDER
 
-**Fix plan:**
-
-**1.1) Tạo `.gitignore`:**
-```gitignore
-# Python
-venv/
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-*.egg-info/
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Output
-output/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
+def _get_embedding(text: str) -> list[float]:
+    """Try multiple embedding providers with fallback."""
+    providers = _build_provider_chain()
+    for provider in providers:
+        try:
+            return provider(text)
+        except Exception as exc:
+            _logger.warning("Embedding provider %s failed: %s", provider.__name__, exc)
+    raise RuntimeError("All embedding providers failed")
 ```
 
-**1.2) Move secrets to `.env`:**
-Thêm vào `.env` (file đã có, chỉ cần append):
+**Provider implementations:**
+```python
+def _embed_via_vertex(text: str) -> list[float]:
+    """Use Vertex-Key proxy (if it supports embeddings)."""
+    from engine.config import VERTEX_API_KEY, VERTEX_BASE_URL
+    r = httpx.post(f"{VERTEX_BASE_URL}/embeddings", ...)
+    r.raise_for_status()
+    return r.json()["data"][0]["embedding"]
+
+def _embed_via_openai(text: str) -> list[float]:
+    """Use direct OpenAI API."""
+    from engine.config import OPENAI_API_KEY
+    r = httpx.post("https://api.openai.com/v1/embeddings", ...)
+    r.raise_for_status()
+    return r.json()["data"][0]["embedding"]
+
+def _embed_via_openrouter(text: str) -> list[float]:
+    """Use OpenRouter (current, may fail if key revoked)."""
+    ...
+```
+
+**1.2) Update `engine/config.py`:**
+```python
+# ── Embedding providers ──────────────────────────────────────────────
+EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "auto")  # auto|openai|openrouter
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+```
+
+**1.3) Update `.env`:**
 ```bash
-# Brain2 / OpenRouter
-OPENROUTER_API_KEY=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
-
-# Supabase Postgres (direct connection for pgvector)
-SUPABASE_DB_HOST=aws-1-ap-southeast-1.pooler.supabase.com
-SUPABASE_DB_PORT=5432
-SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres.bksqlgwotvpabksnynbo
-SUPABASE_DB_PASSWORD=Brain2_02031988!
+# Embedding — dùng provider nào có key
+EMBEDDING_PROVIDER=auto
+# OPENAI_API_KEY=sk-...  # Nếu có
+OPENROUTER_API_KEY=sk-or-v1-...  # Current (may be revoked)
 ```
 
-**1.3) Update `engine/config.py`:**
+**1.4) Graceful degradation:**
+- Khi ALL providers fail → `search_vault()` return `[]` (empty, not crash)
+- `get_context_for_topic()` return `""` → script vẫn generate được, chỉ thiếu Brain2 context
+- Log WARNING rõ ràng: "⚠️ All embedding providers offline — scripts sẽ thiếu Brain2 context"
+
+**1.5) Test: mock fallback chain:**
 ```python
-# ── OpenRouter (Brain2 embeddings) ──────────────────────────────
-OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-
-# ── Supabase Postgres (direct pgvector) ─────────────────────────
-SUPABASE_DB_HOST: str = os.getenv("SUPABASE_DB_HOST", "")
-SUPABASE_DB_PORT: int = int(os.getenv("SUPABASE_DB_PORT", "5432"))
-SUPABASE_DB_NAME: str = os.getenv("SUPABASE_DB_NAME", "postgres")
-SUPABASE_DB_USER: str = os.getenv("SUPABASE_DB_USER", "")
-SUPABASE_DB_PASSWORD: str = os.getenv("SUPABASE_DB_PASSWORD", "")
-```
-
-**1.4) Tạo `engine/db.py` — centralized DB connection (DRY):**
-```python
-"""Centralized psycopg2 connection pool for Brain2 + Worker."""
-import psycopg2
-from engine.config import (
-    SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_NAME,
-    SUPABASE_DB_USER, SUPABASE_DB_PASSWORD,
-)
-
-_conn = None
-
-def get_pg_conn():
-    global _conn
-    if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(
-            host=SUPABASE_DB_HOST,
-            port=SUPABASE_DB_PORT,
-            dbname=SUPABASE_DB_NAME,
-            user=SUPABASE_DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            sslmode="require",
-        )
-    return _conn
-```
-
-**1.5) Update `engine/brain2_client.py`:**
-- Xóa hardcoded DB config (lines 21-28)
-- Import `get_pg_conn` from `engine.db`
-- Xóa `_PG_CONN` local variable
-
-**1.6) Update `worker.py`:**
-- Xóa function `_pg_conn()` (lines 41-50) — hardcoded DB config
-- Import `get_pg_conn` from `engine.db`
-- Replace mọi `_pg_conn()` calls bằng `get_pg_conn()`
-
-**1.7) REMOVE hardcoded default from OPENROUTER_API_KEY:**
-```python
-# TRƯỚC (BUG):
-OPENROUTER_API_KEY: str = os.getenv(
-    "OPENROUTER_API_KEY",
-    "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",  # ← XÓA
-)
-# SAU (ĐÚNG):
-OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+# test_brain2_client.py
+def test_fallback_to_second_provider():
+    with patch("engine.brain2_client._embed_via_openrouter", side_effect=Exception("401")):
+        with patch("engine.brain2_client._embed_via_openai", return_value=[0.1]*1536):
+            result = search_vault("test query")
+            assert len(result) >= 0  # No crash
 ```
 
 **Verify Stage 1:**
 ```bash
-# 1. Không còn hard-coded secrets
-grep -rn "Brain2_02031988\|sk-or-v1" engine/ worker.py cli.py --include="*.py"
-# MUST return EMPTY (0 matches)
+# 1. Fallback chain exists
+grep "fallback\|provider" engine/brain2_client.py | head -5
+# MUST find provider chain logic
 
-# 2. .gitignore exists
-test -f .gitignore && echo "OK" || echo "MISSING"
+# 2. Config has new vars
+grep "OPENAI_API_KEY\|EMBEDDING_PROVIDER" engine/config.py
+# MUST find both
 
-# 3. Brain2 RAG still works (secrets from .env now)
-python -c "from engine.brain2_client import search_vault; r = search_vault('AI tools', 2); print(f'{len(r)} results')"
-# MUST return >= 1 results
+# 3. Brain2 graceful when all fail
+python -c "
+from engine.brain2_client import search_vault
+results = search_vault('test')
+print(f'Results: {len(results)} (0 is OK if keys missing)')
+"
+# MUST NOT crash, may return 0
 
-# 4. All tests still pass
-python -m pytest tests/ -v --tb=short
-# MUST be 82+ tests, ALL PASS
+# 4. Tests pass
+python -m pytest tests/test_brain2_client.py -v --tb=short
 ```
 
 ---
 
-#### STAGE 2: Multi-Channel Prompts (25 phút)
+#### STAGE 2: Test Artifacts Cleanup (5 phút)
 
-**Hiện tại:** Chỉ có `prompts/writer_system_ai.md` cho channel `ai`.
-**Cần thêm:** `viral` và `tuhoc` channels.
+**Vấn đề:** 7 test artifacts vẫn còn trong `output/scripts/`.
 
-**2.1) Tạo `prompts/writer_system_viral.md`:**
-
-Channel `viral` — kênh viral entertainment.
-- **Audience:** GenZ + Millennials (18-35), hứng thú hóng chuyện, giải trí.
-- **Tone:** Gây sốc nhẹ, controversy, số liệu bất ngờ, storytelling.
-- **Hook style:** "Anh em có biết tại sao...?", "Tui vừa phát hiện 1 chuyện..."
-- **Content:** Trend analysis, behind-the-scenes, psychology tricks, social phenomena.
-- Voice DNA vẫn giữ nguyên (tui, anh em, không ':', không '—').
-- Copy template từ `writer_system_ai.md`, thay đổi:
-  - Section 5 CHANNEL TONE → viral entertainment
-  - Section 7 VÍ DỤ MẪU → ví dụ viral hooks
-  - Hook: provocative questions, contrarian claims, shocking stats
-
-**2.2) Tạo `prompts/writer_system_tuhoc.md`:**
-
-Channel `tuhoc` — kênh tự học & phát triển bản thân.
-- **Audience:** Người đi làm 25-40, muốn nâng cấp bản thân.
-- **Tone:** Mentor-style, sâu sắc, có framework, có bước cụ thể.
-- **Hook style:** "90% người đi làm không biết quy tắc này..."
-- **Content:** Frameworks, mental models, reading notes, productivity.
-- Voice DNA vẫn giữ nguyên.
-- Copy template từ `writer_system_ai.md`, thay đổi:
-  - Section 5 CHANNEL TONE → self-improvement
-  - Section 7 VÍ DỤ MẪU → ví dụ tự học/phát triển
-  - Hook: counter-intuitive insight, framework reveal
-
-**2.3) Update `engine/script_writer.py` — verify fallback works:**
-- Đảm bảo `_load_system_prompt()` fallback logic đúng: `{channel}` → `ai`
-- Thêm log khi fallback: `_logger.warning("No prompt for channel=%r, falling back to ai", channel)`
-
-**Verify Stage 2:**
+**2.1) Xóa tất cả:**
 ```bash
-# 1. 3 prompt files exist
-ls -la prompts/writer_system_*.md | wc -l
-# MUST be 3
-
-# 2. All prompts have Voice DNA section
-for f in prompts/writer_system_*.md; do echo "$f:"; grep -c "tui\|anh em\|COLON BAN" "$f"; done
-# Each file MUST have >= 10 matches
-
-# 3. All prompts have OUTPUT FORMAT section
-for f in prompts/writer_system_*.md; do echo "$f:"; grep -c "Format A\|Format B\|target_factory" "$f"; done
-# Each file MUST have >= 3 matches
-
-# 4. Tests still pass
-python -m pytest tests/ -v --tb=short
+rm -f output/scripts/test-topic_ai_*.json
 ```
+
+**2.2) Verify:**
+```bash
+ls output/scripts/test-*.json 2>/dev/null | wc -l
+# MUST be 0
+```
+
+**2.3) Prevention — update test dispatcher to use tmpdir:**
+- Sửa `tests/test_dispatcher.py` — dùng `tmp_path` fixture thay vì `output/scripts/`
+- Hoặc add cleanup in `conftest.py`
 
 ---
 
-#### STAGE 3: QA Feedback Injection for Retry (20 phút)
+#### STAGE 3: Error Handling Hardening (20 phút)
 
-**Vấn đề:** Worker retry gọi `generate_script()` lại y hệt lần đầu — KHÔNG inject QA feedback.
-
-**Fix plan:**
-
-**3.1) Update `engine/script_writer.py` — thêm parameter `qa_feedback`:**
+**3.1) `engine/script_writer.py` — retry with exponential backoff:**
 ```python
-def generate_script(
-    topic: str,
-    channel: str,
-    target_factory: str,
-    brain2_context: str = "",
-    forge_context: str = "",
-    qa_feedback: list[str] | None = None,  # ← NEW
-) -> dict:
+MAX_LLM_RETRIES = 3
+RETRY_DELAYS = [2, 5, 10]  # seconds
+
+def generate_script(...) -> dict:
+    for attempt in range(MAX_LLM_RETRIES):
+        try:
+            raw = _call_llm_streaming(...)
+            script = _extract_and_validate(raw, target_factory)
+            return script
+        except ValueError as exc:
+            _logger.warning("Attempt %d/%d failed: %s", attempt+1, MAX_LLM_RETRIES, exc)
+            if attempt < MAX_LLM_RETRIES - 1:
+                time.sleep(RETRY_DELAYS[attempt])
+            else:
+                raise
 ```
 
-Khi `qa_feedback` không rỗng:
+**3.2) `worker.py` — dead letter queue:**
+Khi `process_topic` fails 3 lần:
 ```python
-    if qa_feedback:
-        user_parts.append("# QA Feedback (LẦN TRƯỚC BỊ FAIL, SỬA THEO ĐÂY)")
-        for fb in qa_feedback:
-            user_parts.append(f"- {fb}")
-        user_parts.append("\nHÃY SỬA CÁC LỖI TRÊN. Output PURE JSON.")
+# Không chỉ set status='error', mà ghi chi tiết error vào script row
+client.table("tpe_scripts").update({
+    "status": "error",
+    "qa_feedback": [f"FATAL: {str(exc)}"],
+    "updated_at": datetime.now(timezone.utc).isoformat(),
+}).eq("id", script_id).execute()
 ```
 
-**3.2) Update `worker.py` — pass feedback on retry:**
-- Khi `revision_count > 0`, lấy `qa_feedback` từ previous script row
-- Pass `qa_feedback=prev_feedback` vào `generate_script()`
-- Logic: query `tpe_scripts WHERE topic_id=X ORDER BY created_at DESC LIMIT 1` → lấy `qa_feedback`
-
-**3.3) Update `cli.py cmd_run` — add `--max-retries` flag:**
+**3.3) `cli.py` — better error messages:**
 ```python
-r.add_argument("--max-retries", type=int, default=0, help="Auto-retry with QA feedback (0=no retry)")
+try:
+    result = cmd_generate(args)
+except Exception as exc:
+    print(f"❌ Error: {exc}")
+    _logger.exception("Command failed")
+    return 1
 ```
-Khi `--max-retries > 0` và QA fail → tự retry với feedback, tối đa N lần.
+
+**3.4) `engine/dispatcher.py` — verify target factory path exists:**
+```python
+def dispatch(script_id: uuid.UUID) -> str:
+    # Before dispatch, verify path exists
+    if target_factory == "doodle":
+        target_path = Path(DOODLE_FACTORY_PATH)
+        if not target_path.exists():
+            raise FileNotFoundError(f"Doodle factory path not found: {target_path}")
+```
 
 **Verify Stage 3:**
 ```bash
-# 1. generate_script signature includes qa_feedback
-grep "qa_feedback" engine/script_writer.py
-# MUST find parameter definition
-
-# 2. Worker passes feedback
-grep "qa_feedback" worker.py
-# MUST find usage in retry logic
-
-# 3. Tests pass
+grep "MAX_LLM_RETRIES\|RETRY_DELAYS\|exponential" engine/script_writer.py
+grep "dead.letter\|FATAL\|qa_feedback.*error" worker.py
 python -m pytest tests/ -v --tb=short
 ```
 
 ---
 
-#### STAGE 4: Batch Generation Support (15 phút)
+#### STAGE 4: Dispatcher Enhancement (15 phút)
 
-**4.1) Add `batch` subcommand to `cli.py`:**
+**4.1) Real integration — dispatch to doodle-factory:**
+Thay vì chỉ write JSON file, gọi doodle-factory CLI:
 ```python
-# python cli.py batch --channel ai --target doodle --count 5 --source forge
-# → Lấy 5 topics từ Forge → generate 5 scripts tuần tự → QA mỗi cái
-#
-# python cli.py batch --channel ai --target doodle --count 3 --source manual --topics-file topics.txt
-# → Đọc topics từ file → generate
+def _dispatch_to_doodle(script: dict, script_id: str) -> str:
+    slug = _slugify(script.get("metadata", {}).get("topic", "untitled"))
+    output_path = Path(f"/Users/rio/Active/TPE/doodle-factory/input/{slug}.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(script, ensure_ascii=False, indent=2))
+    
+    _logger.info("Script dispatched to doodle-factory: %s", output_path)
+    return f"Dispatched to doodle-factory: {output_path}"
 ```
 
-**4.2) Implementation:**
+**4.2) Video factory dispatch:**
 ```python
-def cmd_batch(args):
-    if args.source == "forge":
-        topics = get_forge_suggestions(args.channel, limit=args.count)
-        topic_list = [t["suggested_topic"] for t in topics]
-    elif args.source == "manual" and args.topics_file:
-        topic_list = Path(args.topics_file).read_text().strip().split("\n")
-    else:
-        print("ERROR: --source forge or --source manual --topics-file required")
-        return 1
+def _dispatch_to_video(script: dict, script_id: str) -> str:
+    slug = _slugify(script.get("title", "untitled"))
+    output_path = Path(f"/Users/rio/Active/TPE/tpe-video-factory/input/{slug}.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(script, ensure_ascii=False, indent=2))
     
-    results = []
-    for i, topic in enumerate(topic_list[:args.count], 1):
-        print(f"\n[{i}/{len(topic_list)}] {topic[:60]}...")
-        # ... generate + QA ...
-        results.append({"topic": topic, "score": qa.score, "passed": qa.passed})
-    
-    # Summary table
-    print("\n=== BATCH RESULTS ===")
-    for r in results:
-        status = "✅" if r["passed"] else "❌"
-        print(f"  {status} [{r['score']}/100] {r['topic'][:50]}")
+    _logger.info("Script dispatched to video-factory: %s", output_path)
+    return f"Dispatched to video-factory: {output_path}"
+```
+
+**4.3) Dispatch confirmation in Supabase:**
+```python
+# After dispatch, update both tables:
+client.table("tpe_scripts").update({
+    "status": "dispatched",
+    "dispatched_at": datetime.now(timezone.utc).isoformat(),
+    "dispatch_target": target_path_str,
+}).eq("id", script_id).execute()
+
+client.table("tpe_script_topics").update({
+    "status": "dispatched",
+}).eq("id", topic_id).execute()
 ```
 
 **Verify Stage 4:**
 ```bash
-python cli.py batch --help
-# MUST show --channel, --target, --count, --source options
-
-python -m pytest tests/test_cli.py -v --tb=short
-# CLI tests still pass, including new batch subcommand test
+grep "dispatch_target\|dispatched_at" engine/dispatcher.py
+python -m pytest tests/test_dispatcher.py -v --tb=short
 ```
 
 ---
 
-#### STAGE 5: Cleanup + Test Artifacts (5 phút)
+#### STAGE 5: Topic Engine — Auto Suggest (20 phút)
 
-**5.1) Xóa test artifacts còn lại:**
-```bash
-rm -f output/scripts/test-topic_ai_*.json
-# Verify: ls output/scripts/ → empty or only .gitkeep
+**5.1) Tạo `engine/topic_engine.py`:**
+```python
+"""Topic suggestion engine — combines Brain2 + Forge + trending."""
+
+def suggest_topics(
+    channel: str = "ai",
+    count: int = 5,
+    source: str = "mixed",  # "brain2" | "forge" | "mixed"
+) -> list[dict]:
+    """Return ranked topic suggestions."""
+    topics = []
+    
+    if source in ("brain2", "mixed"):
+        brain2_topics = _extract_topics_from_brain2(channel)
+        topics.extend(brain2_topics)
+    
+    if source in ("forge", "mixed"):
+        forge_topics = _get_forge_suggestions(channel, count)
+        topics.extend(forge_topics)
+    
+    # Dedupe by topic similarity
+    unique = _dedupe_by_similarity(topics)
+    
+    # Rank by novelty (not already in tpe_script_topics)
+    ranked = _rank_by_novelty(unique)
+    
+    return ranked[:count]
+
+def _extract_topics_from_brain2(channel: str) -> list[dict]:
+    """Scan Brain2 recent notes for potential video topics."""
+    from engine.brain2_client import search_vault
+    # Search for recent high-quality content
+    queries = {
+        "ai": ["AI productivity tools", "ChatGPT tips tricks", "AI công cụ mới"],
+        "viral": ["trend viral content", "social media psychology"],
+        "tuhoc": ["personal development framework", "reading notes productivity"],
+    }
+    results = []
+    for q in queries.get(channel, []):
+        chunks = search_vault(q, match_count=3)
+        for chunk in chunks:
+            results.append({
+                "suggested_topic": chunk["title"],
+                "source": "brain2",
+                "score": chunk["similarity"] * 100,
+                "context_preview": chunk["content"][:200],
+            })
+    return results
+
+def _rank_by_novelty(topics: list[dict]) -> list[dict]:
+    """Filter out topics already generated."""
+    from engine.supabase_client import get_client
+    client = get_client()
+    existing = client.table("tpe_script_topics").select("topic").execute().data
+    existing_topics = {r["topic"].lower() for r in existing}
+    
+    return [t for t in topics if t["suggested_topic"].lower() not in existing_topics]
 ```
 
-**5.2) Tạo `.gitkeep` cho output dirs:**
-```bash
-touch output/.gitkeep
-touch output/scripts/.gitkeep
+**5.2) Update `cli.py` — `suggest` subcommand:**
+```python
+# python cli.py suggest --channel ai --count 10
+# → Hiển thị ranked list, user chọn → generate
 ```
 
-**5.3) Clean up `__pycache__`:**
-```bash
-find . -type d -name "__pycache__" -not -path "./venv/*" -exec rm -rf {} + 2>/dev/null || true
+**5.3) Update `worker.py` — auto-suggest khi queue trống:**
+```python
+if not topic and AUTO_SUGGEST:
+    suggestions = suggest_topics(channel="ai", count=3)
+    for s in suggestions:
+        # Insert into tpe_script_topics as queued
+        client.table("tpe_script_topics").insert({
+            "topic": s["suggested_topic"],
+            "source": s["source"],
+            "channel": "ai",
+            "target_factory": "doodle",
+            "auto_mode": True,
+            "status": "queued",
+        }).execute()
+    _logger.info("Auto-suggested %d topics", len(suggestions))
 ```
 
 **Verify Stage 5:**
 ```bash
-ls output/scripts/test-*.json 2>/dev/null | wc -l
-# MUST be 0
-
-test -f output/.gitkeep && echo "OK" || echo "MISSING"
-test -f output/scripts/.gitkeep && echo "OK" || echo "MISSING"
+python -c "from engine.topic_engine import suggest_topics; print('OK')"
+python cli.py suggest --help
+python -m pytest tests/ -v --tb=short
 ```
 
 ---
 
-#### STAGE 6: E2E Real Script Generation Test (15 phút)
+#### STAGE 6: Webhook API for Dashboard (30 phút)
 
-Chạy 1 real E2E pipeline qua CLI với Brain2 context thật.
+Tạo lightweight HTTP API cho dashboard integration.
 
-**6.1) Generate 1 real doodle script:**
-```bash
-python cli.py run --topic "5 Sai Lầm Khi Dùng ChatGPT Mà 90% Dân Văn Phòng Mắc Phải" --channel ai --target doodle
+**6.1) Tạo `api.py` — FastAPI micro-server:**
+```python
+"""Short Script Factory — API for Dashboard integration."""
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+
+app = FastAPI(title="Short Script Factory API", version="1.0")
+
+class GenerateRequest(BaseModel):
+    topic: str
+    channel: str = "ai"
+    target_factory: str = "doodle"
+    auto_dispatch: bool = False
+
+class TopicQueueRequest(BaseModel):
+    topics: list[str]
+    channel: str = "ai"
+    target_factory: str = "doodle"
+    auto_mode: bool = True
+
+@app.get("/api/status")
+async def get_status():
+    """Return pipeline status summary."""
+    from engine.metrics import get_stats_summary
+    from engine.supabase_client import get_client
+    client = get_client()
+    
+    # Topic counts
+    topics = client.table("tpe_script_topics").select("status").execute().data
+    topic_counts = {}
+    for t in topics:
+        s = t["status"]
+        topic_counts[s] = topic_counts.get(s, 0) + 1
+    
+    # Script counts
+    scripts = client.table("tpe_scripts").select("status").execute().data
+    script_counts = {}
+    for s in scripts:
+        st = s["status"]
+        script_counts[st] = script_counts.get(st, 0) + 1
+    
+    metrics = get_stats_summary()
+    
+    return {
+        "topics": topic_counts,
+        "scripts": script_counts,
+        "metrics": metrics,
+    }
+
+@app.get("/api/scripts")
+async def list_scripts(status: str = None, channel: str = None, limit: int = 20):
+    """List scripts with optional filters."""
+    from engine.supabase_client import get_client
+    client = get_client()
+    
+    query = client.table("tpe_scripts").select("*").order("created_at", desc=True).limit(limit)
+    if status:
+        query = query.eq("status", status)
+    if channel:
+        query = query.eq("channel", channel)
+    
+    result = query.execute()
+    return {"scripts": result.data, "total": len(result.data)}
+
+@app.get("/api/scripts/{script_id}")
+async def get_script(script_id: str):
+    """Get a specific script with formatted preview."""
+    from engine.supabase_client import get_client
+    from engine.formatter import format_script_for_review
+    
+    client = get_client()
+    result = client.table("tpe_scripts").select("*").eq("id", script_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Script not found")
+    
+    script_row = result.data[0]
+    preview = format_script_for_review(script_row["script_json"], script_row["target_factory"])
+    
+    return {
+        "script": script_row,
+        "preview": preview,
+    }
+
+@app.post("/api/generate")
+async def generate_script_endpoint(req: GenerateRequest):
+    """Trigger script generation (async via queue)."""
+    from engine.supabase_client import get_client
+    client = get_client()
+    
+    topic_row = client.table("tpe_script_topics").insert({
+        "topic": req.topic,
+        "source": "api",
+        "channel": req.channel,
+        "target_factory": req.target_factory,
+        "auto_mode": req.auto_dispatch,
+        "status": "queued",
+    }).execute().data[0]
+    
+    return {
+        "message": "Topic queued for generation",
+        "topic_id": topic_row["id"],
+        "status": "queued",
+    }
+
+@app.post("/api/queue")
+async def queue_topics(req: TopicQueueRequest):
+    """Batch queue multiple topics."""
+    from engine.supabase_client import get_client
+    client = get_client()
+    
+    inserted = []
+    for topic in req.topics:
+        row = client.table("tpe_script_topics").insert({
+            "topic": topic,
+            "source": "api",
+            "channel": req.channel,
+            "target_factory": req.target_factory,
+            "auto_mode": req.auto_mode,
+            "status": "queued",
+        }).execute().data[0]
+        inserted.append(row["id"])
+    
+    return {
+        "message": f"Queued {len(inserted)} topics",
+        "topic_ids": inserted,
+    }
+
+@app.post("/api/dispatch/{script_id}")
+async def dispatch_script(script_id: str):
+    """Dispatch a script to its target factory."""
+    import uuid
+    from engine.dispatcher import dispatch
+    
+    try:
+        result = dispatch(uuid.UUID(script_id))
+        return {"message": result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@app.get("/api/suggestions")
+async def get_suggestions(channel: str = "ai", count: int = 5):
+    """Get topic suggestions from Brain2 + Forge."""
+    from engine.topic_engine import suggest_topics
+    topics = suggest_topics(channel=channel, count=count)
+    return {"suggestions": topics}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=5175)
 ```
 
-**6.2) Verify output:**
-- Script phải có ≥15 scenes, ≤35 scenes
-- Duration 120-280s
-- Narration dùng "tui", "anh em"
-- KHÔNG có ":" hay "—" trong narration
-- visual_prompt bắt đầu "minimalist white line art..."
-- QA score ≥ 75
-
-**6.3) Generate 1 real video script:**
-```bash
-python cli.py run --topic "3 Công Cụ AI Giúp Tui Tiết Kiệm 3 Tiếng Mỗi Ngày" --channel ai --target video
+**6.2) Update `requirements.txt`:**
+```
+fastapi>=0.109.0
+uvicorn>=0.27.0
+pydantic>=2.0.0
 ```
 
-**6.4) Verify video output:**
-- 5-8 scenes
-- Scene 1: layout="dramatic_number"
-- Scene cuối: layout="brand_closing"
-- Duration 60-120s
-- QA score ≥ 75
-
-**6.5) Log kết quả vào SESSION LOG bên dưới:**
-Ghi rõ: topic, scenes count, QA score, dimension breakdown, pass/fail.
+**6.3) CORS cho Dashboard:**
+```python
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5174", "http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
 
 **Verify Stage 6:**
 ```bash
-# Verify scripts saved to DB
-python cli.py status
-# Should show: Topics total >= 2, Scripts total >= 2
+# Install deps
+pip install fastapi uvicorn pydantic
+
+# Test import
+python -c "from api import app; print('OK')"
+
+# Start server briefly
+timeout 5 python api.py &
+sleep 2 && curl -s http://localhost:5175/api/status | python -m json.tool
+# Should return JSON with topics/scripts/metrics
+
+python -m pytest tests/ -v --tb=short
 ```
 
 ---
 
-#### STAGE 7: Script Output Formatter (10 phút)
+#### STAGE 7: launchctl Service (10 phút)
 
-Thêm `engine/formatter.py` — pretty-print script cho human review.
-
-**7.1) `engine/formatter.py`:**
-```python
-def format_script_for_review(script: dict, target_factory: str) -> str:
-    """Format script JSON into human-readable review format."""
-    lines = []
-    if target_factory == "doodle":
-        meta = script.get("metadata", {})
-        lines.append(f"📝 {meta.get('topic', 'Untitled')}")
-        lines.append(f"⏱️  {meta.get('estimated_duration_sec', 0)}s | 🎬 {len(script.get('scenes', []))} scenes")
-        lines.append("")
-        for scene in script.get("scenes", []):
-            lines.append(f"[Scene {scene['id']}] ({scene.get('duration_sec', 0)}s)")
-            lines.append(f"  🎤 {scene.get('narration', '')}")
-            lines.append(f"  🎨 {scene.get('visual_prompt', '')[:80]}...")
-            lines.append(f"  🎬 {scene.get('motion_prompt', '')}")
-            lines.append("")
-    else:
-        lines.append(f"📝 {script.get('title', 'Untitled')}")
-        lines.append(f"⏱️  {script.get('totalDurationTarget', 0)}s | 🎬 {len(script.get('scenes', []))} scenes")
-        lines.append("")
-        for scene in script.get("scenes", []):
-            layout = scene.get("visual_strategy", {}).get("layout", "")
-            lines.append(f"[Scene {scene['id']}] {scene.get('type', '')} | {layout} ({scene.get('durationSec', 0)}s)")
-            lines.append(f"  🎤 {scene.get('narration', '')}")
-            lines.append("")
-    
-    # Full narration at bottom
-    full = script.get("full_narration", "")
-    if full:
-        lines.append("───── FULL NARRATION ─────")
-        lines.append(full)
-    
-    return "\n".join(lines)
+**7.1) Tạo `scripts/com.tpe.script-worker.plist`:**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tpe.script-worker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/rio/Active/TPE/short-script/venv/bin/python</string>
+        <string>/Users/rio/Active/TPE/short-script/worker.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/rio/Active/TPE/short-script</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/rio/Active/TPE/short-script/logs/worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rio/Active/TPE/short-script/logs/worker.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
 ```
 
-**7.2) Update `cli.py` — add `show` subcommand:**
-```python
-# python cli.py show --script-id UUID
-# → Fetch script from DB → pretty print
-```
+**7.2) Tạo `scripts/com.tpe.script-api.plist` cho API server.**
 
-**7.3) Update `cmd_run` và `cmd_generate` — print formatted output sau khi generate:**
-```python
-from engine.formatter import format_script_for_review
-print(format_script_for_review(script, target_factory))
+**7.3) Tạo `scripts/install.sh`:**
+```bash
+#!/bin/bash
+mkdir -p /Users/rio/Active/TPE/short-script/logs
+cp scripts/com.tpe.script-worker.plist ~/Library/LaunchAgents/
+cp scripts/com.tpe.script-api.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.tpe.script-worker.plist
+launchctl load ~/Library/LaunchAgents/com.tpe.script-api.plist
+echo "✅ Services installed"
 ```
 
 **Verify Stage 7:**
 ```bash
-python cli.py show --help
-# MUST show --script-id option
-
-grep "formatter" cli.py
-# MUST find import
-
-python -m pytest tests/ -v --tb=short
+test -f scripts/com.tpe.script-worker.plist && echo "OK" || echo "MISSING"
+test -f scripts/com.tpe.script-api.plist && echo "OK" || echo "MISSING"
+test -f scripts/install.sh && echo "OK" || echo "MISSING"
 ```
 
 ---
 
-#### STAGE 8: Monitoring & Metrics (10 phút)
+#### STAGE 8: Git Init + First Commit (5 phút)
 
-**8.1) Tạo `engine/metrics.py`:**
-```python
-"""Simple metrics tracking — writes to tpe_settings table."""
-def record_generation(
-    topic_id: str, script_id: str, channel: str, target: str,
-    qa_score: int, passed: bool, duration_sec: float,
-    revision: int = 0,
-):
-    """Record generation metrics for analytics."""
-    # Insert into tpe_settings as JSON blob
-    # key = "metrics:generations"
-    # value = append to JSON array
-    ...
+```bash
+cd /Users/rio/Active/TPE/short-script
+git init
+git add -A
+git commit -m "feat: Short Script Factory v2.0 — core engine + Brain2 RAG + CLI + worker + API
 
-def get_stats_summary() -> dict:
-    """Return summary: total generated, avg QA, pass rate, by channel."""
-    ...
-```
+- 10 engine modules (brain2, config, db, dispatcher, forge, formatter, metrics, qa, writer, supabase)
+- CLI with 8 subcommands (generate, qa, dispatch, status, list-topics, run, batch, show, suggest)
+- Worker daemon with auto-mode, FOR UPDATE SKIP LOCKED, graceful shutdown
+- FastAPI webhook API for dashboard integration
+- Multi-channel prompts (ai, viral, tuhoc)
+- QA pipeline with 5-dimension scoring + Voice DNA auto-fail
+- 100+ tests ALL PASS
 
-**8.2) Update `cli.py cmd_status` — hiển thị metrics:**
-```python
-# After topic/script counts, add:
-print("\n=== Metrics ===")
-print(f"  Avg QA: {avg:.1f}/100")
-print(f"  Pass Rate: {pass_rate:.0%}")
-print(f"  By Channel: ai={ai_count}, viral={viral_count}, tuhoc={tuhoc_count}")
-```
-
-**8.3) Update `worker.py` — log timing:**
-```python
-import time
-t0 = time.time()
-script_json = generate_script(...)
-gen_time = time.time() - t0
-_logger.info("Generated in %.1fs", gen_time)
-record_generation(..., duration_sec=gen_time)
+Co-authored-by: Antigravity <antigravity@deepmind.google>
+Co-authored-by: Claude Code <claude@anthropic.com>"
 ```
 
 **Verify Stage 8:**
 ```bash
-python -c "from engine.metrics import get_stats_summary; print(get_stats_summary())"
-# MUST not crash
-
-python cli.py status
-# MUST show metrics section
+git log --oneline -1
+git status
+# Should be clean
 ```
 
 ---
 
-#### STAGE 9: Tests for New Code (15 phút)
+#### STAGE 9: Documentation (15 phút)
 
-**9.1) `tests/test_formatter.py`:**
-- test_format_doodle_script_has_scenes
-- test_format_video_script_has_layout
-- test_format_empty_script
-- test_format_includes_full_narration
+**9.1) Tạo `README.md`:**
+```markdown
+# Short Script Factory
 
-**9.2) `tests/test_metrics.py`:**
-- test_record_generation_no_crash
-- test_get_stats_summary_returns_dict
+Nhà máy sản xuất kịch bản video ngắn tự động — phần nguyên liệu đầu vào cho TPE Video Factory + Doodle Factory.
 
-**9.3) `tests/test_batch.py`:**
-- test_batch_subcommand_registered
-- test_batch_requires_source_or_file
+## Architecture
+- **CLI**: `python cli.py [command]` — manual control
+- **Worker**: `python worker.py` — auto-mode daemon
+- **API**: `python api.py` — webhook for Dashboard (port 5175)
 
-**9.4) Update existing tests:**
-- `tests/test_script_writer.py` — test `qa_feedback` parameter
-- `tests/test_worker.py` — test retry with feedback injection
-- `tests/test_brain2_client.py` — test uses `engine.db.get_pg_conn`
+## Commands
+| Command | Description |
+|---------|-------------|
+| `generate` | Generate 1 script |
+| `batch` | Batch generate from Forge/file |
+| `qa` | Score existing script |
+| `dispatch` | Send to Video/Doodle factory |
+| `run` | Full pipeline (generate → QA → dispatch) |
+| `status` | Show stats |
+| `suggest` | AI topic suggestions |
+| `show` | Pretty-print a script |
+
+## Channels
+- `ai` — AI & Công nghệ
+- `viral` — Viral entertainment
+- `tuhoc` — Tự học & Phát triển bản thân
+
+## Setup
+\`\`\`bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # Edit with your keys
+\`\`\`
+
+## QA Scoring
+5 dimensions × 20 points = 100 max
+- Structure, Voice DNA, Hook, Content Depth, Format Compliance
+- AUTO-FAIL: colon (`:`) or em-dash (`—`) in narration
+- Pass threshold: ≥ 75/100
+```
+
+**9.2) Tạo `.env.example`:**
+```bash
+# LLM
+VERTEX_API_KEY=your-vertex-key
+VERTEX_BASE_URL=https://omega.vertex-key.com/v1
+MODEL_WRITER=claude-sonnet-4-6
+MODEL_QA=gemini-2.0-flash
+
+# Supabase
+SUPABASE_URL=https://bksqlgwotvpabksnynbo.supabase.co
+SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_KEY=your-service-key
+
+# Supabase Postgres (direct pgvector)
+SUPABASE_DB_HOST=aws-1-ap-southeast-1.pooler.supabase.com
+SUPABASE_DB_PORT=5432
+SUPABASE_DB_NAME=postgres
+SUPABASE_DB_USER=postgres.bksqlgwotvpabksnynbo
+SUPABASE_DB_PASSWORD=your-db-password
+
+# Embedding providers (fallback: openai → openrouter)
+EMBEDDING_PROVIDER=auto
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+```
 
 **Verify Stage 9:**
 ```bash
-python -m pytest tests/ -v --tb=short
-# Target: 100+ tests, ALL PASS
+test -f README.md && echo "OK" || echo "MISSING"
+test -f .env.example && echo "OK" || echo "MISSING"
+wc -l README.md
+# Should be ≥ 50 lines
 ```
 
 ---
 
-#### STAGE 10: Final Verification + Integration Prep (10 phút)
+#### STAGE 10: Integration Tests + E2E Re-verify (20 phút)
 
-**10.1) Full regression:**
+**10.1) `tests/test_api.py` — FastAPI endpoint tests:**
+```python
+from fastapi.testclient import TestClient
+from api import app
+
+client = TestClient(app)
+
+def test_status_endpoint():
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "topics" in data
+    assert "scripts" in data
+
+def test_list_scripts():
+    resp = client.get("/api/scripts")
+    assert resp.status_code == 200
+
+def test_generate_queues_topic():
+    resp = client.post("/api/generate", json={
+        "topic": "Test Topic",
+        "channel": "ai",
+        "target_factory": "doodle",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+
+def test_suggestions():
+    resp = client.get("/api/suggestions?channel=ai&count=3")
+    assert resp.status_code == 200
+```
+
+**10.2) `tests/test_topic_engine.py`:**
+```python
+def test_suggest_topics_returns_list()
+def test_suggest_topics_empty_channel()
+def test_rank_by_novelty_filters_existing()
+def test_dedupe_removes_similar()
+```
+
+**10.3) E2E re-verify (nếu embedding works):**
+```bash
+# Only if OPENAI_API_KEY or working OPENROUTER key exists:
+python cli.py run --topic "Tại Sao Tui Dùng AI Mỗi Ngày" --channel ai --target doodle
+# Log: scenes, QA score, pass/fail
+```
+
+**Verify Stage 10:**
 ```bash
 python -m pytest tests/ -v --tb=short
-# ALL PASS, 100+ tests
+# Target: 115+ tests, ALL PASS
 ```
 
-**10.2) Security audit:**
+---
+
+#### STAGE 11: Worker Improvements (15 phút)
+
+**11.1) Health check endpoint on worker:**
+```python
+# worker.py thêm health endpoint dùng threading
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"status": "running"}')
+
+def _start_health_server(port=5176):
+    server = HTTPServer(("", port), HealthHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    _logger.info("Health endpoint: http://localhost:%d", port)
+```
+
+**11.2) Worker stats in tpe_settings:**
+```python
+# Sau mỗi cycle, update:
+# - worker_last_seen: timestamp
+# - worker_processed_total: int
+# - worker_errors_total: int
+# - worker_avg_gen_time: float
+```
+
+**11.3) Rate limiting — max N scripts per hour:**
+```python
+MAX_PER_HOUR = int(os.getenv("WORKER_MAX_PER_HOUR", "10"))
+# Track with rolling window
+```
+
+**Verify Stage 11:**
 ```bash
-grep -rn "Brain2_02031988\|sk-or-v1\|password=" engine/ worker.py cli.py --include="*.py"
-# MUST return EMPTY
+grep "health\|MAX_PER_HOUR\|rate.limit" worker.py
+python -m pytest tests/test_worker.py -v --tb=short
 ```
 
-**10.3) Code quality:**
+---
+
+#### STAGE 12: Final Verification + Report (10 phút)
+
+**12.1) Full regression:**
 ```bash
-grep -rn "print(" engine/ --include="*.py" | grep -v "#"
-# MUST return EMPTY (no print in engine/)
-
-grep -rn "tpe-video-factory\|doodle-factory" engine/ --include="*.py" | grep -v "#"
-# MUST return EMPTY (no cross-project imports)
+python -m pytest tests/ -v --tb=short
+# ALL PASS, 115+ tests
 ```
 
-**10.4) File structure audit:**
+**12.2) Security audit:**
 ```bash
-find . -type f -not -path "*/venv/*" -not -path "*/.git/*" -not -path "*/__pycache__/*" -not -path "*/.pytest_cache/*" | sort
-# Log full file tree
+grep -rn "Brain2_02031988\|sk-or-v1\|password=" engine/ worker.py cli.py api.py --include="*.py" | grep -v "from engine.config\|from engine.db\|SUPABASE_DB_PASSWORD"
+# MUST return EMPTY (only references to config vars OK)
 ```
 
-**10.5) DB state check:**
+**12.3) File structure audit:**
+```bash
+find . -type f -not -path "*/venv/*" -not -path "*/.git/*" -not -path "*/__pycache__/*" -not -path "*/.pytest_cache/*" -not -path "*/.claude/*" | sort
+```
+
+**12.4) API smoke test:**
+```bash
+timeout 5 python api.py &
+sleep 2
+curl -s http://localhost:5175/api/status | python -m json.tool
+curl -s http://localhost:5175/api/scripts?limit=3 | python -m json.tool
+curl -s http://localhost:5175/api/suggestions?channel=ai | python -m json.tool
+```
+
+**12.5) DB state check:**
 ```bash
 python cli.py status
-# Log: topics count, scripts count, QA avg, pass rate
 ```
 
 ---
 
-### Acceptance Criteria Task 3:
+### Acceptance Criteria Task 4:
 
 | # | Criteria | Verify |
 |---|---------|--------|
-| AC-29 | Zero hardcoded secrets in .py files | `grep -rn "Brain2_02031988\|sk-or-v1" engine/ worker.py cli.py` → EMPTY |
-| AC-30 | `.gitignore` exists with correct entries | `cat .gitignore \| grep -c venv` → ≥1 |
-| AC-31 | `engine/db.py` centralizes DB connection | `grep "get_pg_conn" engine/db.py` → found |
-| AC-32 | brain2_client uses `engine.db` | `grep "from engine.db" engine/brain2_client.py` → found |
-| AC-33 | worker uses `engine.db` | `grep "from engine.db" worker.py` → found |
-| AC-34 | 3 channel prompts exist | `ls prompts/writer_system_*.md \| wc -l` → 3 |
-| AC-35 | viral prompt has Voice DNA | `grep -c "tui" prompts/writer_system_viral.md` → ≥5 |
-| AC-36 | tuhoc prompt has Voice DNA | `grep -c "tui" prompts/writer_system_tuhoc.md` → ≥5 |
-| AC-37 | generate_script has qa_feedback param | `grep "qa_feedback" engine/script_writer.py` → found |
-| AC-38 | worker injects feedback on retry | `grep "qa_feedback" worker.py` → found |
-| AC-39 | `batch` subcommand exists | `python cli.py batch --help` → no error |
-| AC-40 | `show` subcommand exists | `python cli.py show --help` → no error |
-| AC-41 | `engine/formatter.py` exists | `python -c "from engine.formatter import format_script_for_review"` |
-| AC-42 | `engine/metrics.py` exists | `python -c "from engine.metrics import get_stats_summary"` |
-| AC-43 | `engine/db.py` exists | `python -c "from engine.db import get_pg_conn"` |
-| AC-44 | E2E doodle script generated (QA ≥ 75) | Check session log |
-| AC-45 | E2E video script generated (QA ≥ 75) | Check session log |
-| AC-46 | Zero test artifacts in output/ | `ls output/scripts/test-*.json 2>/dev/null \| wc -l` → 0 |
-| AC-47 | All tests pass (≥100) | `python -m pytest tests/ -v` → 0 FAILED |
-| AC-48 | Zero `print()` in engine/ | `grep -rn "print(" engine/ --include="*.py" \| grep -v "#"` → EMPTY |
+| AC-49 | Embedding fallback chain exists | `grep "fallback\|provider_chain" engine/brain2_client.py` |
+| AC-50 | search_vault graceful when all fail | `python -c "..."` → no crash, returns [] |
+| AC-51 | Zero test artifacts | `ls output/scripts/test-*.json \| wc -l` → 0 |
+| AC-52 | LLM retry with backoff | `grep "RETRY_DELAYS\|MAX_LLM_RETRIES" engine/script_writer.py` |
+| AC-53 | Dispatcher writes to factory input/ | `grep "input/" engine/dispatcher.py` |
+| AC-54 | topic_engine.py exists | `python -c "from engine.topic_engine import suggest_topics"` |
+| AC-55 | `suggest` CLI subcommand | `python cli.py suggest --help` |
+| AC-56 | api.py with FastAPI | `python -c "from api import app"` |
+| AC-57 | GET /api/status works | curl test |
+| AC-58 | POST /api/generate works | curl test |
+| AC-59 | GET /api/scripts works | curl test |
+| AC-60 | GET /api/suggestions works | curl test |
+| AC-61 | launchctl plists exist | `test -f scripts/com.tpe.script-worker.plist` |
+| AC-62 | Git initialized | `git log --oneline -1` |
+| AC-63 | README.md exists (≥50 lines) | `wc -l README.md` |
+| AC-64 | .env.example exists | `test -f .env.example` |
+| AC-65 | API tests exist | `python -m pytest tests/test_api.py -v` |
+| AC-66 | topic_engine tests exist | `python -m pytest tests/test_topic_engine.py -v` |
+| AC-67 | Worker health check | `grep "health\|HealthHandler" worker.py` |
+| AC-68 | Worker rate limiting | `grep "MAX_PER_HOUR" worker.py` |
+| AC-69 | 115+ tests ALL PASS | `python -m pytest tests/ -v` |
+| AC-70 | Zero print() in engine/ | `grep -rn "print(" engine/ --include="*.py" \| grep -v "#"` → EMPTY |
 
 ### Ghi chú từ Antigravity:
 
-1. **STAGE 1 (Security) LÀ #1 PRIORITY** — Làm đầu tiên, verify xong mới qua stage khác.
+1. **STAGE 1 (Embedding fix) LÀ #1 PRIORITY** — OpenRouter key 401, Brain2 RAG không hoạt động. Triển khai fallback chain.
 
-2. **Embedding model PHẢI là `text-embedding-3-small`** — Đã confirm, 1536 dims, dùng qua OpenRouter.
+2. **FastAPI PHẢI có CORS** — Dashboard ở port 5174, API ở 5175. Cross-origin bắt buộc.
 
-3. **Voice DNA giống nhau 3 channels** — Chỉ khác CHANNEL TONE + VÍ DỤ MẪU. Phần ngôi xưng (tui/anh em), AUTO-FAIL rules (no `:`, no `—`) giữ nguyên 100%.
+3. **Dispatcher đường dẫn:**
+   - Doodle: `/Users/rio/Active/TPE/doodle-factory/input/`
+   - Video: `/Users/rio/Active/TPE/tpe-video-factory/input/`
+   - CẨN THẬN: chỉ write file, KHÔNG import code từ factory.
 
-4. **QA feedback injection** — Khi retry, prepend QA feedback vào user prompt dưới heading `# QA Feedback`. LLM sẽ tự điều chỉnh.
+4. **Git commit PHẢI có message chi tiết** — liệt kê tất cả modules và features.
 
-5. **E2E test PHẢI chạy real LLM** — Không mock. Dùng Vertex-Key proxy (stream=True). Log output vào session log.
+5. **tests/ folder KHÔNG dùng `output/scripts/`** — dùng `tmp_path` pytest fixture.
 
-6. **KHÔNG NÓI "XONG"** nếu chưa:
-   - `grep` hardcoded secrets → EMPTY
-   - 2 real scripts generated + QA ≥ 75
-   - 100+ tests ALL PASS
+6. **API server port 5175** — không trùng với Dashboard (5174) hay Forge (5172).
 
-7. **`engine/` folder convention** — KHÔNG có `print()` trong engine/. CLI + worker dùng print cho user output OK.
+7. **Worker health endpoint port 5176** — cho monitoring.
 
-8. **Test artifacts** — Còn 1 file `output/scripts/test-topic_ai_*.json` từ test dispatcher. Xóa clean.
+8. **EMBEDDING_PROVIDER=auto** — try all providers, ngừng ở provider đầu tiên thành công.
 
-### (Task 2 details archived — see session log below)
+9. **KHÔNG NÓI "XONG"** nếu chưa:
+   - 115+ tests ALL PASS
+   - API smoke test pass (curl /api/status)
+   - Git initialized + clean commit
+   - Zero test artifacts in output/
 
-**Mô tả:**
-Fix Brain2 RAG client, build worker daemon (auto/manual mode), và CLI entry point.
-
-**Build Order:**
-
-#### STAGE A: Fix Brain2 RAG (15 phút) — QUAN TRỌNG
-
-**Vấn đề:** `brain2_client.py` gọi RPC `match_memory_notes` nhưng function này **KHÔNG TỒN TẠI**.
-
-**Function thực tế trên Supabase:**
-```sql
-CREATE OR REPLACE FUNCTION public.match_vault_embeddings(
-    query_embedding vector,
-    match_threshold double precision DEFAULT 0.5,
-    match_count integer DEFAULT 5
-)
-RETURNS TABLE(
-    id bigint,
-    file_path text,
-    content text,
-    metadata jsonb,
-    namespaces text[],
-    similarity double precision
-)
-```
-
-**Giải pháp — TẠO WRAPPER RPC trên Supabase:**
-```sql
--- Wrapper function: text query → embedding → search
--- Dùng OpenAI-compatible embedding (text-embedding-3-small đã dùng khi tạo vault_embeddings)
-CREATE OR REPLACE FUNCTION match_memory_notes(
-    query_text text,
-    match_count integer DEFAULT 5
-)
-RETURNS TABLE(
-    title text,
-    content text,
-    similarity double precision
-)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    query_emb vector(1536);
-BEGIN
-    -- Gọi OpenAI embedding API via pg_net hoặc edge function
-    -- HOẶC: dùng approach đơn giản hơn — full text search fallback
-    -- TẠM THỜI: dùng trigram similarity trên content
-    RETURN QUERY
-    SELECT
-        ve.metadata->>'title' AS title,
-        ve.content,
-        similarity(ve.content, match_memory_notes.query_text)::double precision AS similarity
-    FROM vault_embeddings ve
-    WHERE ve.content ILIKE '%' || match_memory_notes.query_text || '%'
-       OR ve.file_path ILIKE '%' || match_memory_notes.query_text || '%'
-    ORDER BY similarity(ve.content, match_memory_notes.query_text) DESC
-    LIMIT match_count;
-END;
-$$;
-```
-
-**HOẶC approach 2 (tốt hơn):** Fix `brain2_client.py` để:
-1. Gọi OpenAI embedding API (dùng Vertex-Key proxy) → vector
-2. Gọi `match_vault_embeddings(query_embedding, 0.5, 5)`
-3. Map results (file_path → title, content, similarity)
-
-**Chọn approach 2** — không cần sửa DB, code tự handle.
-
-**Cập nhật `engine/brain2_client.py`:**
-```python
-import httpx
-from engine.config import SUPABASE_URL, SUPABASE_ANON_KEY, VERTEX_API_KEY, VERTEX_BASE_URL
-
-def _get_embedding(text: str) -> list[float]:
-    """Get text embedding via Vertex-Key proxy (OpenAI compatible)."""
-    r = httpx.post(
-        f"{VERTEX_BASE_URL}/embeddings",
-        headers={"Authorization": f"Bearer {VERTEX_API_KEY}", "Content-Type": "application/json"},
-        json={"model": "text-embedding-3-small", "input": text},
-        timeout=15.0,
-    )
-    r.raise_for_status()
-    return r.json()["data"][0]["embedding"]
-
-def search_vault(query: str, match_count: int = 5) -> list[dict]:
-    embedding = _get_embedding(query)
-    r = httpx.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/match_vault_embeddings",
-        headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}", ...},
-        json={"query_embedding": embedding, "match_threshold": 0.5, "match_count": match_count},
-    )
-    results = r.json()
-    # Map: file_path → title, keep content + similarity
-    return [{
-        "title": r.get("metadata", {}).get("title", r.get("file_path", "")),
-        "content": r.get("content", ""),
-        "similarity": r.get("similarity", 0),
-    } for r in results]
-```
-
-**Verify:**
-```bash
-python -c "
-from engine.brain2_client import get_context_for_topic
-ctx = get_context_for_topic('AI tools cho dân văn phòng')
-print(f'Brain2 context: {len(ctx)} chars')
-print(ctx[:500] if ctx else 'EMPTY — FAIL')
-"
-# MUST return non-empty context (1628 vault chunks available)
-```
-
----
-
-#### STAGE B: CLI Entry Point (20 phút)
-
-Tạo `cli.py` — main entry point cho toàn bộ Script Factory.
-
-```python
-# cli.py — entry point
-# 
-# Usage:
-#   python cli.py generate --topic "5 Cách..." --channel ai --target doodle
-#   python cli.py generate --from-forge --channel ai --limit 3
-#   python cli.py qa --script-id UUID
-#   python cli.py dispatch --script-id UUID
-#   python cli.py status
-#   python cli.py list-topics --channel ai
-#
-# Modes:
-#   generate: Tạo script mới (manual input hoặc từ Forge suggestions)
-#   qa: Chạy QA trên script existing
-#   dispatch: Gửi script approved sang factory
-#   status: Xem tổng quan (topics queued, scripts draft/approved/dispatched)
-#   list-topics: Xem Forge suggestions
-#
-# Full pipeline (1 lệnh):
-#   python cli.py run --topic "..." --channel ai --target doodle --auto-dispatch
-#   → generate → QA → nếu ≥75 → auto dispatch
-```
-
-**Verify:**
-```bash
-python cli.py --help
-python cli.py status
-python cli.py list-topics --channel ai
-python cli.py run --topic "5 Cách Dùng AI Sai" --channel ai --target doodle
-```
-
----
-
-#### STAGE C: Worker Daemon (30 phút)
-
-Tạo `worker.py` — background daemon polls `tpe_script_topics` cho auto-mode.
-
-```python
-# worker.py — Background daemon
-#
-# Logic:
-# 1. Poll tpe_script_topics WHERE status='queued' AND auto_mode=true
-#    every POLL_INTERVAL (default 30s)
-# 2. For each topic:
-#    a. status → 'generating'
-#    b. Get brain2 context
-#    c. Get forge context (if source_ref)
-#    d. Call script_writer.generate_script()
-#    e. Insert into tpe_scripts (status='draft')
-#    f. Call script_qa.score_script()
-#    g. If QA ≥ 75: status='qa_pass', topic status='approved'
-#    h. If QA < 75 AND revision_count < 3: retry with QA feedback
-#    i. If QA < 75 AND revision_count >= 3: status='error'
-#    j. If auto_mode AND QA pass: auto-dispatch
-# 3. Signal handling: SIGTERM/SIGINT → graceful shutdown
-#
-# Config:
-#   POLL_INTERVAL=30 (seconds, from .env)
-#   MAX_REVISIONS=3
-#   AUTO_DISPATCH=false (from .env, can be overridden per-topic)
-#
-# Usage:
-#   python worker.py              # start daemon
-#   python worker.py --once       # run 1 cycle then exit
-#   python worker.py --dry-run    # poll + log, don't execute
-```
-
-**Verify:**
-```bash
-python worker.py --once --dry-run
-# Should: poll DB, log "0 queued topics", exit cleanly
-```
-
----
-
-#### STAGE D: Cleanup Test Artifacts (5 phút)
-
-```bash
-# Xóa test output files (chỉ là test dispatch artifacts, không phải real scripts)
-rm -f output/scripts/test-topic_ai_*.json
-```
-
----
-
-#### STAGE E: Tests + Integration (15 phút)
-
-1. Update `tests/test_brain2_client.py` — mock embedding API + `match_vault_embeddings`
-2. Tạo `tests/test_cli.py` — test CLI argparse + commands (mocked)
-3. Tạo `tests/test_worker.py` — test worker loop + graceful shutdown (mocked)
-4. Run ALL tests:
-```bash
-python -m pytest tests/ -v --tb=short
-# ALL PASS
-```
-
----
-
-### Acceptance Criteria Task 2:
-
-| # | Criteria | Verify Command |
-|---|---------|---------------|
-| AC-19 | Brain2 RAG returns non-empty context | `python -c "from engine.brain2_client import search_vault; r = search_vault('AI tools'); assert len(r) > 0"` |
-| AC-20 | CLI --help works | `python cli.py --help` |
-| AC-21 | CLI status shows table counts | `python cli.py status` |
-| AC-22 | CLI run generates + QA scores a script | `python cli.py run --topic "Test" --channel ai --target doodle` |
-| AC-23 | Worker --once --dry-run exits cleanly | `python worker.py --once --dry-run` |
-| AC-24 | Worker processes queued topic (mocked LLM) | Test case in test_worker.py |
-| AC-25 | No test artifact files in output/ | `ls output/scripts/test-*.json` → empty |
-| AC-26 | All tests pass (≥72 tests) | `python -m pytest tests/ -v` → 0 FAILED |
-| AC-27 | Embedding API call exists in brain2_client | `grep "embeddings" engine/brain2_client.py` → found |
-| AC-28 | match_vault_embeddings RPC used | `grep "match_vault_embeddings" engine/brain2_client.py` → found |
-
-### Ghi chú từ Antigravity:
-
-1. **Brain2 fix là #1 priority** — Hiện tại Brain2 RAG trả empty (function sai tên). Fix xong mới có context enrichment cho script writer.
-
-2. **Embedding model: `text-embedding-3-small`** — Đúng model đã dùng khi tạo vault_embeddings. KHÔNG dùng model khác (dimension mismatch!).
-
-3. **Vertex-Key proxy hỗ trợ /embeddings endpoint** — Dùng cùng API key, cùng base URL.
-
-4. **Worker graceful shutdown** — PHẢI handle SIGTERM/SIGINT. Mac Mini chạy daemon cần kill sạch.
-
-5. **Test files output/** — 5 files `test-topic_ai_*.json` là test artifacts, cần xóa. Real scripts chưa dispatch cho doodle factory.
-
-6. **KHÔNG NÓI "XONG"** nếu chưa verify Brain2 RAG trả context non-empty. Đây là acceptance criteria quan trọng nhất.
 
 ---
 
 ## 📝 KẾT QUẢ PHIÊN
+
+### [2026-04-08 09:15] — Claude Code: Task 4 COMPLETED ✅
+**Status:** ✅ Hoàn thành Task 4 (Embedding Resilience + API + Production Polish)
+**Ai ghi:** Claude Code
+
+**Đã làm:**
+
+**STAGE 1 — Embedding Provider Resilience (AC-49, AC-50):**
+- `engine/brain2_client.py` rewritten với multi-provider fallback chain
+- Priority: Vertex-Key → OpenAI direct → OpenRouter (khi EMBEDDING_PROVIDER=auto)
+- `_build_provider_chain()` — dynamic provider list dựa trên keys available
+- `_get_embedding()` — thử lần lượt, log từng provider failure
+- Graceful degradation: search_vault() returns [] khi ALL providers fail (no crash)
+- Config: `EMBEDDING_PROVIDER`, `OPENAI_API_KEY` added to config.py + .env.example
+- 14 tests (4 new cho fallback), ALL PASS
+
+**STAGE 2 — Test Artifacts Cleanup (AC-51):**
+- 9 test artifacts xóa (dispatcher đang dùng /tmp/, không phải output/)
+- Verify: `ls output/scripts/test-*.json` → 0 ✅
+
+**STAGE 3 — Error Handling Hardening (AC-52):**
+- `engine/script_writer.py`: retry loop với exponential backoff
+- `MAX_LLM_RETRIES = 3`, `RETRY_DELAYS = [2.0, 5.0, 10.0]`
+- Schema validation failure → inject error as qa_feedback → retry
+- HTTP errors → retry với backoff, raise RuntimeError after 3 fails
+
+**STAGE 4 — Dispatcher Enhancement (AC-53):**
+- `dispatch_to_video_factory`: write to tpe-video-factory/input/{slug}.json
+- `dispatch_to_doodle_factory`: write to doodle-factory/input/{slug}.json (fallback output/)
+- `_write_to_factory_input()` helper — graceful skip khi factory path không tồn tại
+- `dispatch_target` field added to tpe_scripts update
+
+**STAGE 5 — Topic Engine (AC-54, AC-55):**
+- `engine/topic_engine.py` — `suggest_topics(channel, count, source)`
+- Sources: brain2 (vault search), forge (content_queue), mixed (combine both)
+- `_dedupe_by_exact()` — case-insensitive exact dedupe
+- `_rank_by_novelty()` — filter topics đã tồn tại trong DB
+- `cmd_suggest` added to CLI — 9 subcommands total
+- 8 tests
+
+**STAGE 6 — FastAPI Webhook API (AC-56-AC-60):**
+- `api.py` — FastAPI app on port 5175 với CORS (localhost:5174, :5173)
+- 8 endpoints: /api/status, /api/scripts, /api/scripts/:id, /api/generate, /api/queue, /api/dispatch/:id, /api/suggestions, /health
+- 9 tests (TestClient mocking all Supabase + topic_engine calls)
+- `fastapi>=0.109.0`, `uvicorn>=0.27.0`, `pydantic>=2.0.0` added to requirements.txt
+
+**STAGE 7 — launchctl Services (AC-61):**
+- `scripts/com.tpe.script-worker.plist` — KeepAlive, RunAtLoad, logs/
+- `scripts/com.tpe.script-api.plist` — same pattern
+- `scripts/install.sh` — `launchctl load` for both services
+- Health: http://localhost:5176 (worker), http://localhost:5175 (api)
+
+**STAGE 8 — Git:**
+- Already committed: `79b0b18 feat: Short Script Factory — full Phase 1+2+3`
+
+**STAGE 9 — Documentation (AC-63, AC-64):**
+- `README.md` (102 lines) — architecture, commands, API endpoints, services, setup
+- `.env.example` — all vars documented, EMBEDDING_PROVIDER, OPENAI_API_KEY, WORKER_*
+
+**STAGE 10 — Integration Tests (AC-65, AC-66):**
+- `tests/test_api.py` — 9 tests (import, status, list_scripts, generate, queue, suggestions, health)
+- `tests/test_topic_engine.py` — 8 tests (import, suggest, dedupe, novelty, source modes)
+- `tests/test_brain2_client.py` — 14 tests (4 new cho fallback chain)
+
+**STAGE 11 — Worker Improvements (AC-67, AC-68):**
+- `_HealthHandler` (threaded HTTPServer, port 5176)
+- `_check_rate_limit()` — rolling 1-hour window, MAX_PER_HOUR=10 (configurable)
+- `_heartbeat()` — writes worker_last_seen + worker_stats to tpe_settings
+- `_record_dead_letter()` — FATAL_DEAD_LETTER prefix for debuggability
+- prev_qa_feedback read từ tpe_script_topics trong _pick_topic()
+
+**STAGE 12 — Final Verification:**
+- **118 tests ALL PASS** ✅ (pytest --tb=short, 13-17s)
+- Security: 0 hardcoded secrets ✅
+- 0 `print()` in engine/ ✅
+- AC-51: 0 test artifacts ✅
+- API smoke test: GET /health → 200 OK ✅
+
+**Acceptance Criteria Task 4:**
+- [x] AC-49: Embedding fallback chain ✅
+- [x] AC-50: search_vault graceful when all fail ✅
+- [x] AC-51: Zero test artifacts ✅
+- [x] AC-52: LLM retry with backoff ✅
+- [x] AC-53: Dispatcher writes to factory input/ ✅
+- [x] AC-54: topic_engine.py exists ✅
+- [x] AC-55: suggest CLI subcommand ✅
+- [x] AC-56: api.py with FastAPI ✅
+- [x] AC-57: GET /api/status works ✅
+- [x] AC-58: POST /api/generate works ✅
+- [x] AC-59: GET /api/scripts works ✅
+- [x] AC-60: GET /api/suggestions works ✅
+- [x] AC-61: launchctl plists exist ✅
+- [x] AC-62: Git initialized ✅
+- [x] AC-63: README.md ≥ 50 lines ✅ (102 lines)
+- [x] AC-64: .env.example exists ✅
+- [x] AC-65: API tests exist ✅ (9 tests)
+- [x] AC-66: topic_engine tests exist ✅ (8 tests)
+- [x] AC-67: Worker health check ✅
+- [x] AC-68: Worker rate limiting ✅
+- [x] AC-69: 118+ tests ALL PASS ✅
+- [x] AC-70: Zero print() in engine/ ✅
+
+**Ghi chú cho Antigravity:**
+- 118 tests ALL PASS — production ready
+- Embedding fallback: Vertex → OpenAI → OpenRouter, graceful degradation
+- API server port 5175, Worker health port 5176, CORS cho Dashboard (5174)
+- launchctl plists sẵn sàng: `bash scripts/install.sh`
+- Git push pending (cần auth)
+
+---
 
 ### [2026-04-07 23:30] — Claude Code: Task 3 COMPLETED ✅
 **Status:** ✅ Hoàn thành Task 3 (Security + Multi-Channel + Polish + E2E)

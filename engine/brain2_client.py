@@ -1,38 +1,133 @@
 """
-Brain2 vault search via direct psycopg2 + OpenRouter embeddings.
+Brain2 vault search via direct psycopg2 + multi-provider embeddings.
 
-Uses OpenRouter (text-embedding-3-small) → OpenAI-compatible.
-Queries vault_embeddings with cosine similarity via direct PostgreSQL connection.
+Embedding provider priority (when EMBEDDING_PROVIDER=auto):
+  1. Vertex-Key proxy  — fast, already used for LLM calls
+  2. OpenAI direct    — if OPENAI_API_KEY set
+  3. OpenRouter      — last resort (key may be revoked)
+
+Graceful degradation: when ALL providers fail → search_vault() returns [],
+get_context_for_topic() returns "". Script generation continues without Brain2 context.
+
 Credentials sourced from engine.config → engine.db — never hardcoded.
 """
 import logging
 import httpx
-from engine.config import OPENROUTER_API_KEY
+from engine.config import (
+    EMBEDDING_PROVIDER,
+    OPENAI_API_KEY,
+    OPENROUTER_API_KEY,
+    VERTEX_API_KEY,
+    VERTEX_BASE_URL,
+)
 from engine.db import get_pg_conn
 
 _logger = logging.getLogger(__name__)
 
-# ── Embedding via OpenRouter ──────────────────────────────────────────────────
-def _get_embedding(text: str) -> list[float]:
-    """
-    Get text embedding via OpenRouter (text-embedding-3-small).
-    Returns 1536-dim vector.
-    Raises httpx.HTTPStatusError on failure.
-    """
+
+# ── Embedding providers ────────────────────────────────────────────────────────
+
+def _embed_via_vertex(text: str) -> list[float]:
+    """Embed via Vertex-Key proxy (OpenAI-compatible /embeddings endpoint)."""
+    r = httpx.post(
+        f"{VERTEX_BASE_URL}/embeddings",
+        headers={
+            "Authorization": f"Bearer {VERTEX_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"model": "text-embedding-3-small", "input": text},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json()["data"][0]["embedding"]
+
+
+def _embed_via_openai(text: str) -> list[float]:
+    """Embed via direct OpenAI API (if user has OPENAI_API_KEY)."""
+    r = httpx.post(
+        "https://api.openai.com/v1/embeddings",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"model": "text-embedding-3-small", "input": text},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json()["data"][0]["embedding"]
+
+
+def _embed_via_openrouter(text: str) -> list[float]:
+    """Embed via OpenRouter (may fail if key revoked)."""
     r = httpx.post(
         "https://openrouter.ai/api/v1/embeddings",
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": "openai/text-embedding-3-small",
-            "input": text,
-        },
+        json={"model": "openai/text-embedding-3-small", "input": text},
         timeout=30.0,
     )
     r.raise_for_status()
     return r.json()["data"][0]["embedding"]
+
+
+def _build_provider_chain() -> list[tuple[str, callable]]:
+    """
+    Build ordered list of (name, provider_func) based on EMBEDDING_PROVIDER setting.
+
+    When EMBEDDING_PROVIDER=auto: try all available providers in order of reliability.
+    When explicit: use only that provider.
+    """
+    mode = EMBEDDING_PROVIDER.strip().lower()
+    chain: list[tuple[str, callable]] = []
+
+    if mode in ("auto", "vertex"):
+        chain.append(("vertex", _embed_via_vertex))
+
+    if mode in ("auto", "openai") and OPENAI_API_KEY:
+        chain.append(("openai", _embed_via_openai))
+
+    if mode in ("auto", "openrouter") and OPENROUTER_API_KEY:
+        chain.append(("openrouter", _embed_via_openrouter))
+
+    # Deduplicate in case mode=auto and user set same key twice
+    seen = set()
+    deduped = []
+    for name, fn in chain:
+        if name not in seen:
+            seen.add(name)
+            deduped.append((name, fn))
+
+    return deduped
+
+
+def _get_embedding(text: str) -> list[float]:
+    """
+    Try embedding providers in order until one succeeds.
+
+    Priority (EMBEDDING_PROVIDER=auto):
+      1. Vertex-Key  — fast, already warm
+      2. OpenAI      — if OPENAI_API_KEY set
+      3. OpenRouter  — last resort
+
+    Raises RuntimeError if ALL providers fail.
+    """
+    chain = _build_provider_chain()
+    if not chain:
+        raise RuntimeError("No embedding provider configured (check .env)")
+
+    errors: list[str] = []
+    for name, provider_fn in chain:
+        try:
+            vector = provider_fn(text)
+            _logger.debug("Embedding via %s: %ddim", name, len(vector))
+            return vector
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            _logger.warning("Embedding provider %s failed: %s", name, exc)
+
+    raise RuntimeError(f"All embedding providers failed: {'; '.join(errors)}")
 
 
 # ── Core search ───────────────────────────────────────────────────────────────
@@ -40,8 +135,10 @@ def search_vault(query: str, match_count: int = 5) -> list[dict]:
     """
     Perform semantic search against Brain2 vault chunks.
 
-    Uses OpenRouter for embedding, direct psycopg2 for pgvector search.
+    Uses multi-provider embedding + direct psycopg2 for pgvector search.
     Cosine similarity = 1 - (<=> operator).
+
+    Graceful degradation: returns [] on any failure (no crash).
 
     Args:
         query:       Text query to search for.
@@ -51,16 +148,18 @@ def search_vault(query: str, match_count: int = 5) -> list[dict]:
         List of dicts with keys: title, content, similarity.
         Returns empty list on failure.
     """
-    if not OPENROUTER_API_KEY:
-        _logger.warning("OPENROUTER_API_KEY not set — skipping vault search")
-        return []
-
+    # ── Step 1: Get embedding (with fallback) ──────────────────────────────
     try:
         embedding = _get_embedding(query)
-    except Exception as exc:
-        _logger.error("Failed to get embedding for query %r: %s", query, exc)
+    except RuntimeError as exc:
+        _logger.warning(
+            "All embedding providers offline — scripts will lack Brain2 context. "
+            "Configure EMBEDDING_PROVIDER in .env. Error: %s",
+            exc,
+        )
         return []
 
+    # ── Step 2: pgvector search ────────────────────────────────────────────
     try:
         conn = get_pg_conn()
         cur = conn.cursor()

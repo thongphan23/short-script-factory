@@ -21,7 +21,9 @@ SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_KEY: str = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-# ── OpenRouter (Brain2 embeddings) ──────────────────────────────────────
+# ── Embedding providers (fallback chain: openai → openrouter) ─────────────
+EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "auto")  # auto|openai|openrouter|vertex
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
 # ── Supabase Postgres (direct pgvector) ───────────────────────────────────

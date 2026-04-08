@@ -19,11 +19,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import uuid
 from datetime import datetime, timezone
-
-from engine.config import OUTPUT_SCRIPTS_DIR
 
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -475,6 +472,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_suggest(args: argparse.Namespace) -> int:
+    """Show AI-generated topic suggestions from Brain2 + Forge."""
+    from engine.topic_engine import suggest_topics
+
+    topics = suggest_topics(channel=args.channel, count=args.count, source=args.source)
+    if not topics:
+        print(f"No suggestions for channel={args.channel}")
+        return 0
+
+    print(f"=== Topic Suggestions ({args.channel}, {args.source}, {len(topics)} items) ===")
+    for i, t in enumerate(topics, 1):
+        score = t.get("score", 0)
+        preview = t.get("context_preview", "")
+        print(f"[{i}] [{score:.0f}] {t['suggested_topic']}")
+        if preview:
+            print(f"      ↳ {preview[:80]}")
+    return 0
+
+
 # ── Argument parser ──────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -537,6 +553,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-retries", type=int, default=0,
                    help="Auto-retry with QA feedback (0=no retry, max=3)")
     r.set_defaults(func=cmd_run)
+
+    # suggest
+    sg = sub.add_parser("suggest", help="Show AI topic suggestions from Brain2 + Forge")
+    sg.add_argument("--channel", default="ai", choices=["ai", "viral", "tuhoc"])
+    sg.add_argument("--count", type=int, default=10, help="Number of suggestions")
+    sg.add_argument("--source", default="mixed", choices=["brain2", "forge", "mixed"])
+    sg.set_defaults(func=cmd_suggest)
 
     return parser
 

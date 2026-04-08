@@ -3,10 +3,12 @@ Script Writer — generates video scripts via streaming LLM call.
 
 CORE MODULE: reads voice-dna.md + script-formats.md specs at runtime.
 Calls Vertex-Key LLM with streaming, parses JSON response, validates output.
+Retry with exponential backoff on schema failures.
 """
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from openai import OpenAI
 from engine.config import (
@@ -17,6 +19,10 @@ from engine.config import (
 )
 
 _logger = logging.getLogger(__name__)
+
+# ── Retry config ──────────────────────────────────────────────────────────────
+MAX_LLM_RETRIES: int = 3
+RETRY_DELAYS: list[float] = [2.0, 5.0, 10.0]  # seconds, exponential backoff
 
 # ── LLM client (lazy init) ────────────────────────────────────────────────────
 _client: OpenAI | None = None
@@ -161,57 +167,86 @@ def generate_script(
     """
     system_prompt = _load_system_prompt(channel, target_factory)
 
-    user_parts = [f"# Topic\n{topic}"]
-    if qa_feedback:
-        user_parts.append("# QA Feedback (LẦN TRƯỚC BỊ FAIL, SỬA THEO ĐÂY)")
-        for fb in qa_feedback:
-            user_parts.append(f"- {fb}")
-        user_parts.append("\nHÃY SỬA CÁC LỖI TRÊN. Output PURE JSON.")
-    if brain2_context:
-        user_parts.append(f"# Brain2 Context\n{brain2_context}")
-    if forge_context:
-        user_parts.append(f"# Forge Context\n{forge_context}")
-    user_prompt = "\n\n".join(user_parts)
+    # ── Retry loop with exponential backoff ────────────────────────────────
+    for attempt in range(MAX_LLM_RETRIES):
+        user_parts = [f"# Topic\n{topic}"]
+        if qa_feedback:
+            user_parts.append("# QA Feedback (LẦN TRƯỚC BỊ FAIL, SỬA THEO ĐÂY)")
+            for fb in qa_feedback:
+                user_parts.append(f"- {fb}")
+            user_parts.append("\nHÃY SỬA CÁC LỖI TRÊN. Output PURE JSON.")
+        if brain2_context:
+            user_parts.append(f"# Brain2 Context\n{brain2_context}")
+        if forge_context:
+            user_parts.append(f"# Forge Context\n{forge_context}")
+        user_prompt = "\n\n".join(user_parts)
 
-    client = _get_client()
-    _logger.info(
-        "generate_script: topic=%r channel=%r target=%r",
-        topic[:60], channel, target_factory,
-    )
+        client = _get_client()
+        _logger.info(
+            "generate_script: topic=%r channel=%r target=%r attempt=%d/%d",
+            topic[:60], channel, target_factory, attempt + 1, MAX_LLM_RETRIES,
+        )
 
-    # ── Streaming LLM call (BẮT BUỘC — avoids CloudFlare 524) ────────────
-    stream = client.chat.completions.create(
-        model=MODEL_WRITER,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        max_tokens=4096,
-        stream=True,
-    )
+        # ── Streaming LLM call (BẮT BUỘC — avoids CloudFlare 524) ──────
+        try:
+            stream = client.chat.completions.create(
+                model=MODEL_WRITER,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=4096,
+                stream=True,
+            )
 
-    chunks: list[str] = []
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            chunks.append(delta)
+            chunks: list[str] = []
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    chunks.append(delta)
 
-    full_text = "".join(chunks)
-    _logger.info("LLM response: %d chars", len(full_text))
+            full_text = "".join(chunks)
+            _logger.info("LLM response: %d chars", len(full_text))
 
-    # ── Parse JSON ──────────────────────────────────────────────────────────
-    script = _extract_json(full_text)
+            # ── Parse JSON ───────────────────────────────────────────────
+            script = _extract_json(full_text)
 
-    # ── Validate schema ────────────────────────────────────────────────────
-    if target_factory == "doodle":
-        errors = _validate_doodle(script)
-    else:
-        errors = _validate_video(script)
+            # ── Validate schema ──────────────────────────────────────────
+            if target_factory == "doodle":
+                errors = _validate_doodle(script)
+            else:
+                errors = _validate_video(script)
 
-    if errors:
-        _logger.error("Schema validation failed: %s", errors)
-        raise ValueError(f"Schema validation errors: {errors}")
+            if errors:
+                _logger.warning(
+                    "Schema validation failed (attempt %d/%d): %s",
+                    attempt + 1, MAX_LLM_RETRIES, errors,
+                )
+                if attempt < MAX_LLM_RETRIES - 1:
+                    time.sleep(RETRY_DELAYS[attempt])
+                    # Inject validation errors as next attempt's QA feedback
+                    qa_feedback = [f"Schema error: {'; '.join(errors[:3])}"]
+                    continue
+                else:
+                    raise ValueError(f"Schema validation errors: {errors}")
+
+            _logger.info("Script generated: %d scenes", len(script.get("scenes", [])))
+            return script
+
+        except ValueError:
+            # Re-raise schema errors (already handled above, or from _extract_json)
+            raise
+        except Exception as exc:
+            _logger.warning(
+                "LLM call failed (attempt %d/%d): %s",
+                attempt + 1, MAX_LLM_RETRIES, exc,
+            )
+            if attempt < MAX_LLM_RETRIES - 1:
+                time.sleep(RETRY_DELAYS[attempt])
+            else:
+                _logger.error("All LLM attempts failed: %s", exc)
+                raise RuntimeError(f"generate_script failed after {MAX_LLM_RETRIES} attempts: {exc}") from exc
 
     _logger.info("Script generated: %d scenes", len(script.get("scenes", [])))
     return script
