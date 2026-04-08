@@ -158,6 +158,65 @@ class TestSuggestionsEndpoint:
         assert resp.json()["suggestions"] == []
 
 
+class TestDispatchEndpoint:
+    def test_dispatch_script_success(self):
+        """POST /api/dispatch/:id dispatches script and returns target."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        with patch("engine.dispatcher.dispatch", return_value="doodle-factory"):
+            client = TestClient(app)
+            resp = client.post("/api/dispatch/550e8400-e29b-41d4-a716-446655440000")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "message" in data
+
+    def test_dispatch_script_invalid_uuid(self):
+        """POST /api/dispatch/:id with invalid UUID returns 400."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        client = TestClient(app)
+        resp = client.post("/api/dispatch/not-a-uuid")
+        assert resp.status_code == 400
+
+
+class TestRejectEndpoint:
+    def test_reject_script_success(self):
+        """PATCH /api/scripts/:id/reject updates status to rejected."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "s1"}],
+        )
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.patch("/api/scripts/s1/reject")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["message"] == "Script rejected"
+        assert data["script_id"] == "s1"
+
+    def test_reject_script_not_found(self):
+        """PATCH /api/scripts/:id/reject returns 404 when script missing."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.patch("/api/scripts/nonexistent-id/reject")
+
+        assert resp.status_code == 404
+
+
 class TestHealthEndpoint:
     def test_health_returns_ok(self):
         """GET /health returns ok status."""
@@ -168,6 +227,21 @@ class TestHealthEndpoint:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+    def test_api_health_returns_provider_info(self):
+        """GET /api/health returns embedding provider count."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        with patch("engine.brain2_client._build_provider_chain", return_value=[("vertex", lambda x: x)]):
+            client = TestClient(app)
+            resp = client.get("/api/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "api" in data
+        assert "embedding_providers" in data
+        assert "version" in data
 
 
 class TestTopicsEndpoint:

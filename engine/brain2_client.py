@@ -130,6 +130,47 @@ def _get_embedding(text: str) -> list[float]:
     raise RuntimeError(f"All embedding providers failed: {'; '.join(errors)}")
 
 
+# ── Text-based fallback (no embedding API needed) ─────────────────────────────
+
+def _search_vault_text(query: str, match_count: int = 5) -> list[dict]:
+    """
+    Fallback: ILIKE text search when embedding API is unavailable.
+    Slower but works without any embedding key.
+    """
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                COALESCE(ve.metadata->>'title', ve.file_path, '') AS title,
+                ve.file_path,
+                LEFT(ve.content, 500) AS content,
+                0.5 AS similarity
+            FROM vault_embeddings ve
+            WHERE ve.content ILIKE %(q)s
+               OR ve.file_path ILIKE %(q)s
+            ORDER BY LENGTH(ve.content) DESC
+            LIMIT %(limit)s
+            """,
+            {"q": f"%{query}%", "limit": match_count},
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "title": str(row[0]) if row[0] else "",
+                "file_path": str(row[1]) if row[1] else "",
+                "content": str(row[2]) if row[2] else "",
+                "similarity": float(row[3]) if row[3] is not None else 0.0,
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        _logger.warning("Vault text search failed: %s", exc)
+        return []
+
+
 # ── Core search ───────────────────────────────────────────────────────────────
 def search_vault(query: str, match_count: int = 5) -> list[dict]:
     """
@@ -153,11 +194,10 @@ def search_vault(query: str, match_count: int = 5) -> list[dict]:
         embedding = _get_embedding(query)
     except RuntimeError as exc:
         _logger.warning(
-            "All embedding providers offline — scripts will lack Brain2 context. "
-            "Configure EMBEDDING_PROVIDER in .env. Error: %s",
+            "All embedding providers offline — falling back to text search. %s",
             exc,
         )
-        return []
+        return _search_vault_text(query, match_count)
 
     # ── Step 2: pgvector search ────────────────────────────────────────────
     try:

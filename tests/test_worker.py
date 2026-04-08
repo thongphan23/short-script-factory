@@ -161,8 +161,10 @@ class TestWorkerGracefulShutdown:
 
         with patch.object(worker, "get_pg_conn", return_value=MagicMock()):
             with patch.object(worker, "_pick_topic", return_value=None):
-                # Should not raise
-                worker.run_daemon(once=True, dry_run=True)
+                # Skip health server binding to avoid port conflict when worker daemon is running
+                with patch.object(worker, "_start_health_server", lambda *args, **kwargs: None):
+                    # Should not raise
+                    worker.run_daemon(once=True, dry_run=True)
 
     def test_dry_run_skips_generation(self):
         """dry_run=True → process_topic returns True without calling generate_script."""

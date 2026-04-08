@@ -226,6 +226,41 @@ async def list_topics(status: str = None, channel: str = None, limit: int = 50):
     return {"topics": result.data, "total": len(result.data)}
 
 
+# ── PATCH /api/scripts/{script_id}/reject ─────────────────────────────────────
+@app.patch("/api/scripts/{script_id}/reject")
+async def reject_script(script_id: str):
+    """Reject a script."""
+    from datetime import datetime, timezone
+    from engine.supabase_client import get_client
+    client = get_client()
+
+    row = client.table("tpe_scripts").select("id").eq("id", script_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Script not found")
+
+    client.table("tpe_scripts").update({
+        "status": "rejected",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", script_id).execute()
+    return {"message": "Script rejected", "script_id": script_id}
+
+
+# ── GET /api/health — combined health check (AC-108) ─────────────────────────
+@app.get("/api/health")
+async def api_health():
+    """Extended health check with embedding provider status."""
+    from engine.brain2_client import _build_provider_chain
+
+    providers = _build_provider_chain()
+    return {
+        "api": "running",
+        "version": "3.2",
+        "embedding_providers": len(providers),
+        "provider_names": [name for name, _ in providers],
+        "supabase": "connected",
+    }
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():

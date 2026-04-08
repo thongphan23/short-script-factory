@@ -44,22 +44,38 @@ class TestSearchVault:
         assert result[0]["content"] == "Power law in work..."
         assert result[0]["similarity"] == 0.85
 
-    def test_search_vault_empty_when_no_provider(self):
-        """AC-50: Returns [] when no embedding provider is configured."""
+    def test_search_vault_falls_back_to_text_when_no_provider(self):
+        """AC-50: Returns text-search results when no embedding provider configured."""
         import engine.brain2_client as bc
         importlib.reload(bc)
+
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [
+            ("Test Note", "01-Atomic/test.md", "Test content here", 0.5),
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
 
         with patch.object(bc, "EMBEDDING_PROVIDER", "auto"):
             with patch.object(bc, "VERTEX_API_KEY", ""):
                 with patch.object(bc, "OPENAI_API_KEY", ""):
                     with patch.object(bc, "OPENROUTER_API_KEY", ""):
-                        result = bc.search_vault("test")
-                        assert result == []
+                        with patch("engine.brain2_client.get_pg_conn", return_value=mock_conn):
+                            result = bc.search_vault("test")
+                            assert len(result) == 1
+                            assert result[0]["title"] == "Test Note"
 
-    def test_search_vault_handles_embedding_error(self):
-        """AC-50: Returns [] when all embedding providers fail."""
+    def test_search_vault_falls_back_to_text_when_embedding_fails(self):
+        """AC-50: Returns text-search results when all embedding providers fail."""
         import engine.brain2_client as bc
         importlib.reload(bc)
+
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [
+            ("AI Note", "01-Atomic/ai.md", "AI content", 0.5),
+        ]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
 
         with patch.object(bc, "EMBEDDING_PROVIDER", "auto"):
             with patch.object(bc, "VERTEX_API_KEY", "x"):
@@ -67,8 +83,10 @@ class TestSearchVault:
                     with patch.object(bc, "OPENROUTER_API_KEY", ""):
                         with patch("engine.brain2_client.httpx.post") as mock_http:
                             mock_http.side_effect = Exception("HTTP error")
-                            result = bc.search_vault("test")
-                            assert result == []
+                            with patch("engine.brain2_client.get_pg_conn", return_value=mock_conn):
+                                result = bc.search_vault("test")
+                                assert len(result) == 1
+                                assert result[0]["title"] == "AI Note"
 
     def test_search_vault_handles_db_error(self):
         """Returns [] when psycopg2 query fails."""
