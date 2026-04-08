@@ -15,16 +15,12 @@ class TestIntegration:
     All external APIs mocked.
     """
 
-    @patch("engine.script_writer.OpenAI")
-    @patch("engine.script_writer._load_system_prompt")
     @patch("engine.dispatcher.get_client")
-    def test_full_pipeline_doodle(self, mock_dc, mock_prompt, mock_openai):
+    def test_full_pipeline_doodle(self, mock_dc):
         """
         AC-18: topic → generate_script (mocked) → score_script → dispatch.
         """
-        # ── Step 1: Mock LLM produces valid doodle_script ────────────────
-        mock_client = MagicMock()
-        mock_stream = MagicMock()
+        # ── Step 1: Mock LLM chain ──────────────────────────────────────
         json_output = (
             '{"metadata": {"topic": "5 AI Tips", "channel": "ai", '
             '"target_audience": "dân văn phòng", "estimated_duration_sec": 180, '
@@ -40,20 +36,17 @@ class TestIntegration:
             '"full_narration": "Anh em ơi, tui phát hiện 90% dùng AI sai. Bước 1 nè, tui sẽ hướng dẫn cụ thể.", '
             '"hook_text": "90% dùng AI sai, tui phát hiện rồi nha."}'
         )
-        chunks = []
-        # Split into chunks to simulate streaming
-        for i in range(0, len(json_output), 30):
-            chunk = MagicMock()
-            chunk.choices = [MagicMock(delta=MagicMock(content=json_output[i:i+30]))]
-            chunks.append(chunk)
+        mock_client = MagicMock()
+        mock_stream = MagicMock()
+        chunks = [
+            MagicMock(choices=[MagicMock(delta=MagicMock(content=json_output[i:i+30]))])
+            for i in range(0, len(json_output), 30)
+        ]
         mock_stream.__iter__ = lambda s: iter(chunks)
         mock_client.chat.completions.create.return_value = mock_stream
-        mock_openai.return_value = mock_client
-        mock_prompt.return_value = "You are Thong Phan."
 
         # ── Step 2: Mock Supabase for dispatch ──────────────────────────
         mock_supabase = MagicMock()
-        # Return valid script on read
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
             data=[{
                 "id": str(uuid.uuid4()),
@@ -88,17 +81,19 @@ class TestIntegration:
         importlib.reload(qa)
         importlib.reload(d)
 
-        # Patch _get_client inside sw module
-        with patch.object(sw, "_get_client", return_value=mock_client):
-            # Patch validation to skip scene count check (this is integration test)
-            with patch.object(sw, "_validate_doodle", return_value=[]):
-                script = sw.generate_script(
-                    topic="5 AI Tips",
-                    channel="ai",
-                    target_factory="doodle",
-                    brain2_context="Power law applies.",
-                    forge_context="",
-                )
+        from engine.script_writer import LLMProvider
+        mock_provider = LLMProvider(name="test", client=mock_client, model="test")
+
+        with patch.object(sw, "_build_llm_chain", return_value=[mock_provider]), \
+             patch.object(sw, "_load_system_prompt", return_value="You are Thong Phan."), \
+             patch.object(sw, "_validate_doodle", return_value=[]):
+            script = sw.generate_script(
+                topic="5 AI Tips",
+                channel="ai",
+                target_factory="doodle",
+                brain2_context="Power law applies.",
+                forge_context="",
+            )
 
         assert "scenes" in script
         assert len(script["scenes"]) >= 2

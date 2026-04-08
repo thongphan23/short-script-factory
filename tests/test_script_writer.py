@@ -145,47 +145,41 @@ class TestScriptWriter:
         errors = _validate_video(script)
         assert any("Scene count" in e for e in errors)
 
-    @patch("engine.script_writer.OpenAI")
-    @patch("engine.script_writer._load_system_prompt")
-    def test_generate_script_streaming(self, mock_prompt, mock_openai):
+    def test_generate_script_streaming(self):
         """generate_script calls LLM with streaming and parses JSON."""
-        # Mock LLM streaming response — valid 6-scene video script
+        import engine.script_writer as sw
+        from engine.script_writer import LLMProvider
+
         valid_script = (
             '{"title": "AI Tips", '
             '"totalDurationTarget": 90, '
             '"scenes": ['
-            '{"id": 1, "type": "hook", "narration": "90% dùng sai nha.", '
+            '{"id": 1, "type": "hook", "narration": "90% dung sai nha.", '
             '"durationSec": 8, "props": {}, "visual_strategy": {"layout": "dramatic_number", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "number_countup"}}, '
-            '{"id": 2, "type": "card", "narration": "Tui thấy kết quả khác.", '
+            '{"id": 2, "type": "card", "narration": "Tui thay ket qua khac.", '
             '"durationSec": 10, "props": {}, "visual_strategy": {"layout": "card_list", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "typewriter"}}, '
-            '{"id": 3, "type": "card", "narration": "Bước 1 nè.", '
+            '{"id": 3, "type": "card", "narration": "Buoc 1 ne.", '
             '"durationSec": 10, "props": {}, "visual_strategy": {"layout": "timeline_steps", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "fade_in"}}, '
-            '{"id": 4, "type": "card", "narration": "Bước 2 nha.", '
+            '{"id": 4, "type": "card", "narration": "Buoc 2 ne.", '
             '"durationSec": 10, "props": {}, "visual_strategy": {"layout": "timeline_steps", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "fade_in"}}, '
-            '{"id": 5, "type": "card", "narration": "Bước 3 nha.", '
+            '{"id": 5, "type": "card", "narration": "Buoc 3 ne.", '
             '"durationSec": 10, "props": {}, "visual_strategy": {"layout": "timeline_steps", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "fade_in"}}, '
-            '{"id": 6, "type": "cta", "narration": "Đăng ký kênh nha.", '
+            '{"id": 6, "type": "cta", "narration": "Dang ky kenh nha.", '
             '"durationSec": 8, "props": {}, "visual_strategy": {"layout": "brand_closing", "background": {"type": "gradient", "query": ""}, "data_viz": {"type": "none", "data": []}, "emphasis_element": "fade_in"}}'
             ']}'
         )
         mock_client = MagicMock()
         mock_stream = MagicMock()
-        # Split into chunks to simulate streaming
         chunks = [
             MagicMock(choices=[MagicMock(delta=MagicMock(content=c))])
-            for c in [valid_script[i:i+30] for i in range(0, len(valid_script), 30)]
+            for c in [valid_script[i:i+20] for i in range(0, len(valid_script), 20)]
         ]
         mock_stream.__iter__ = lambda s: iter(chunks)
         mock_client.chat.completions.create.return_value = mock_stream
-        mock_openai.return_value = mock_client
+        mock_provider = LLMProvider(name="mock-provider", client=mock_client, model="test")
 
-        mock_prompt.return_value = "You are Thong Phan."
-
-        import importlib
-        import engine.script_writer as sw
-        importlib.reload(sw)
-
-        with patch.object(sw, "_get_client", return_value=mock_client):
+        with patch.object(sw, "_build_llm_chain", return_value=[mock_provider]), \
+             patch.object(sw, "_load_system_prompt", return_value="You are Thong Phan."):
             result = sw.generate_script(
                 topic="5 AI tips",
                 channel="ai",
@@ -198,28 +192,24 @@ class TestScriptWriter:
         assert "scenes" in result
         assert len(result["scenes"]) == 6
 
-    @patch("engine.script_writer.OpenAI")
-    @patch("engine.script_writer._load_system_prompt")
-    def test_generate_script_validation_fails(self, mock_prompt, mock_openai):
+    def test_generate_script_validation_fails(self):
         """Raises ValueError when LLM output fails schema validation."""
+        import engine.script_writer as sw
+        from engine.script_writer import LLMProvider
+
         mock_client = MagicMock()
         mock_stream = MagicMock()
         chunks = [
-            MagicMock(choices=[MagicMock(delta=MagicMock(content=c))])
-            for c in ['{"title": "Bad", "scenes": [{"id": 1}]}']
+            MagicMock(choices=[MagicMock(delta=MagicMock(
+                content='{"title": "Bad", "scenes": [{"id": 1}]}'
+            ))])
         ]
-        # Only 1 scene — will fail video validation (need 5-8)
-        mock_stream.__iter__ = lambda self: iter(chunks)
+        mock_stream.__iter__ = lambda s: iter(chunks)
         mock_client.chat.completions.create.return_value = mock_stream
-        mock_openai.return_value = mock_client
+        mock_provider = LLMProvider(name="mock", client=mock_client, model="test")
 
-        mock_prompt.return_value = "Prompt"
-
-        import engine.script_writer as sw
-        import importlib
-        importlib.reload(sw)
-
-        with patch.object(sw, "_get_client", return_value=mock_client):
+        with patch.object(sw, "_build_llm_chain", return_value=[mock_provider]), \
+             patch.object(sw, "_load_system_prompt", return_value="Prompt"):
             with pytest.raises(ValueError) as exc:
                 sw.generate_script(
                     topic="Test",
@@ -227,6 +217,74 @@ class TestScriptWriter:
                     target_factory="video",
                 )
             assert "Schema validation errors" in str(exc.value)
+
+    def test_call_llm_with_fallback_vertex_fail_then_openrouter_succeeds(self):
+        """First provider fails → fallback to second provider → success."""
+        import engine.script_writer as sw
+        from engine.script_writer import LLMProvider
+
+        valid_json = '{"title": "Fallback OK", "scenes": []}'
+
+        mock_client1 = MagicMock()
+        mock_client1.chat.completions.create.side_effect = Exception("502 Bad Gateway")
+
+        mock_client2 = MagicMock()
+        mock_stream2 = MagicMock()
+        chunks2 = [
+            MagicMock(choices=[MagicMock(delta=MagicMock(content=c))])
+            for c in [valid_json[i:i+10] for i in range(0, len(valid_json), 10)]
+        ]
+        mock_stream2.__iter__ = lambda s: iter(chunks2)
+        mock_client2.chat.completions.create.return_value = mock_stream2
+
+        provider1 = LLMProvider(name="vertex-key", client=mock_client1, model="claude-4")
+        provider2 = LLMProvider(name="openrouter", client=mock_client2, model="anthropic/claude-4")
+
+        with patch.object(sw, "_build_llm_chain", return_value=[provider1, provider2]):
+            result = sw._call_llm_with_fallback(
+                system_prompt="sys", user_prompt="user"
+            )
+            assert "Fallback OK" in result
+
+    def test_call_llm_with_fallback_all_fail_raises(self):
+        """All providers fail → RuntimeError with error list."""
+        import engine.script_writer as sw
+        from engine.script_writer import LLMProvider
+
+        mock_client1 = MagicMock()
+        mock_client1.chat.completions.create.side_effect = Exception("502 Bad Gateway")
+        mock_client2 = MagicMock()
+        mock_client2.chat.completions.create.side_effect = Exception("401 Unauthorized")
+
+        p1 = LLMProvider(name="vertex-key", client=mock_client1, model="claude")
+        p2 = LLMProvider(name="openrouter", client=mock_client2, model="claude")
+
+        with patch.object(sw, "_build_llm_chain", return_value=[p1, p2]):
+            with pytest.raises(RuntimeError) as exc:
+                sw._call_llm_with_fallback(system_prompt="sys", user_prompt="user")
+            assert "All LLM providers failed" in str(exc.value)
+            assert "502" in str(exc.value)
+            assert "401" in str(exc.value)
+
+    def test_build_llm_chain(self):
+        """_build_llm_chain returns providers when keys available."""
+        import engine.script_writer as sw
+        import importlib
+        importlib.reload(sw)
+
+        with patch.object(sw, "VERTEX_API_KEY", "vk"), \
+             patch.object(sw, "VERTEX_BASE_URL", "https://vx.com"), \
+             patch.object(sw, "MODEL_WRITER", "claude-4"), \
+             patch.object(sw, "OPENROUTER_API_KEY", "or-key"), \
+             patch.object(sw, "OPENROUTER_API_KEY", "or-key"), \
+             patch.object(sw, "MODEL_WRITER_OPENROUTER", "anthropic/claude-4"), \
+             patch.object(sw, "OPENAI_API_KEY", ""):
+
+            chain = sw._build_llm_chain()
+
+        assert len(chain) == 2
+        assert chain[0].name == "vertex-key"
+        assert chain[1].name == "openrouter"
 
     def test_generate_script_signature_has_qa_feedback(self):
         """AC-37: generate_script accepts qa_feedback parameter."""

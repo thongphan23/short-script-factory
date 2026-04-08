@@ -16,6 +16,10 @@ VERTEX_BASE_URL: str = os.getenv("VERTEX_BASE_URL", "https://omega.vertex-key.co
 MODEL_WRITER: str = os.getenv("MODEL_WRITER", "claude-sonnet-4-6")
 MODEL_QA: str = os.getenv("MODEL_QA", "gemini-2.0-flash")
 
+# ── LLM multi-provider fallback models ───────────────────────────────
+MODEL_WRITER_OPENROUTER: str = os.getenv("MODEL_WRITER_OPENROUTER", "anthropic/claude-sonnet-4-6")
+MODEL_WRITER_OPENAI: str = os.getenv("MODEL_WRITER_OPENAI", "gpt-4o")
+
 # ── Supabase ──────────────────────────────────────────────────────────────
 SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")

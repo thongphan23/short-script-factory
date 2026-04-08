@@ -2,7 +2,8 @@
 Script Writer — generates video scripts via streaming LLM call.
 
 CORE MODULE: reads voice-dna.md + script-formats.md specs at runtime.
-Calls Vertex-Key LLM with streaming, parses JSON response, validates output.
+Calls LLM with multi-provider fallback (Vertex-Key → OpenRouter → OpenAI direct).
+Streams response, parses JSON, validates output.
 Retry with exponential backoff on schema failures.
 """
 import json
@@ -10,11 +11,16 @@ import logging
 import re
 import time
 from pathlib import Path
+from typing import NamedTuple
 from openai import OpenAI
 from engine.config import (
     VERTEX_API_KEY,
     VERTEX_BASE_URL,
     MODEL_WRITER,
+    MODEL_WRITER_OPENROUTER,
+    MODEL_WRITER_OPENAI,
+    OPENROUTER_API_KEY,
+    OPENAI_API_KEY,
     PROJECT_ROOT,
 )
 
@@ -24,15 +30,106 @@ _logger = logging.getLogger(__name__)
 MAX_LLM_RETRIES: int = 3
 RETRY_DELAYS: list[float] = [2.0, 5.0, 10.0]  # seconds, exponential backoff
 
-# ── LLM client (lazy init) ────────────────────────────────────────────────────
-_client: OpenAI | None = None
+
+# ── LLM multi-provider chain ────────────────────────────────────────────────
+class LLMProvider(NamedTuple):
+    name: str
+    client: OpenAI
+    model: str
 
 
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=VERTEX_API_KEY, base_url=VERTEX_BASE_URL)
-    return _client
+def _build_llm_chain() -> list[LLMProvider]:
+    """Build ordered list of LLM providers. First available wins."""
+    chain: list[LLMProvider] = []
+
+    # 1. Vertex-Key (primary — cheapest)
+    if VERTEX_API_KEY:
+        chain.append(LLMProvider(
+            name="vertex-key",
+            client=OpenAI(api_key=VERTEX_API_KEY, base_url=VERTEX_BASE_URL),
+            model=MODEL_WRITER,
+        ))
+
+    # 2. OpenRouter (secondary)
+    if OPENROUTER_API_KEY:
+        chain.append(LLMProvider(
+            name="openrouter",
+            client=OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"),
+            model=MODEL_WRITER_OPENROUTER,
+        ))
+
+    # 3. OpenAI direct (expensive fallback)
+    if OPENAI_API_KEY:
+        chain.append(LLMProvider(
+            name="openai",
+            client=OpenAI(api_key=OPENAI_API_KEY),
+            model=MODEL_WRITER_OPENAI,
+        ))
+
+    return chain
+
+
+def _call_llm_with_fallback(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+) -> str:
+    """
+    Call LLM with automatic fallback across providers.
+
+    Returns:
+        Raw text response from first successful provider.
+
+    Raises:
+        RuntimeError: If ALL providers fail.
+    """
+    chain = _build_llm_chain()
+    if not chain:
+        raise RuntimeError(
+            "No LLM providers configured. Set VERTEX_API_KEY, "
+            "OPENROUTER_API_KEY, or OPENAI_API_KEY in .env"
+        )
+
+    errors: list[str] = []
+    for provider in chain:
+        try:
+            _logger.info("LLM call: provider=%s model=%s", provider.name, provider.model)
+            stream = provider.client.chat.completions.create(
+                model=provider.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+
+            chunks: list[str] = []
+            for i, chunk in enumerate(stream):
+                if not chunk.choices:
+                    _logger.warning("Empty choices at chunk %d — skipping", i)
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    chunks.append(delta.content)
+
+            full_text = "".join(chunks)
+            if not full_text.strip():
+                raise ValueError("Empty response from LLM")
+
+            _logger.info(
+                "LLM success: provider=%s chars=%d", provider.name, len(full_text)
+            )
+            return full_text
+
+        except Exception as exc:
+            _logger.warning("LLM provider %s failed: %s", provider.name, exc)
+            errors.append(f"{provider.name}: {exc}")
+            continue
+
+    raise RuntimeError(f"All LLM providers failed: {'; '.join(errors)}")
 
 
 # ── Prompt loader ────────────────────────────────────────────────────────────
@@ -164,6 +261,7 @@ def generate_script(
 
     Raises:
         ValueError: If JSON parse or schema validation fails.
+        RuntimeError: If ALL LLM providers fail.
     """
     system_prompt = _load_system_prompt(channel, target_factory)
 
@@ -181,35 +279,19 @@ def generate_script(
             user_parts.append(f"# Forge Context\n{forge_context}")
         user_prompt = "\n\n".join(user_parts)
 
-        client = _get_client()
         _logger.info(
             "generate_script: topic=%r channel=%r target=%r attempt=%d/%d",
             topic[:60], channel, target_factory, attempt + 1, MAX_LLM_RETRIES,
         )
 
-        # ── Streaming LLM call (BẮT BUỘC — avoids CloudFlare 524) ──────
+        # ── LLM call with multi-provider fallback ─────────────────────────
         try:
-            stream = client.chat.completions.create(
-                model=MODEL_WRITER,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+            full_text = _call_llm_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 temperature=0.7,
                 max_tokens=4096,
-                stream=True,
             )
-
-            chunks: list[str] = []
-            for i, chunk in enumerate(stream):
-                if not chunk.choices:
-                    _logger.warning("Empty choices at chunk %d — skipping", i)
-                    continue
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    chunks.append(delta.content)
-
-            full_text = "".join(chunks)
             _logger.info("LLM response: %d chars", len(full_text))
 
             # ── Parse JSON ───────────────────────────────────────────────
@@ -249,7 +331,9 @@ def generate_script(
                 time.sleep(RETRY_DELAYS[attempt])
             else:
                 _logger.error("All LLM attempts failed: %s", exc)
-                raise RuntimeError(f"generate_script failed after {MAX_LLM_RETRIES} attempts: {exc}") from exc
+                raise RuntimeError(
+                    f"generate_script failed after {MAX_LLM_RETRIES} attempts: {exc}"
+                ) from exc
 
-    _logger.info("Script generated: %d scenes", len(script.get("scenes", [])))
-    return script
+    # Should never reach here but satisfy type checker
+    raise RuntimeError("generate_script: unexpected exit from retry loop")
