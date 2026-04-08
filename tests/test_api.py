@@ -168,3 +168,82 @@ class TestHealthEndpoint:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+class TestTopicsEndpoint:
+    def test_list_topics_returns_data(self):
+        """GET /api/topics returns topic list."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_topics = [
+            {"id": "t1", "topic": "AI Tips", "status": "queued", "channel": "ai"},
+        ]
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=mock_topics,
+        )
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.get("/api/topics")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "topics" in data
+        assert data["total"] == 1
+
+    def test_list_topics_with_channel_filter(self):
+        """GET /api/topics?channel=ai filters correctly."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.order.return_value.limit.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[],
+        )
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.get("/api/topics?channel=ai&limit=5")
+
+        assert resp.status_code == 200
+
+
+class TestApproveEndpoint:
+    def test_approve_script_success(self):
+        """PATCH /api/scripts/:id/approve updates status to approved."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_client = MagicMock()
+        # Select returns existing row
+        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "s1"}],
+        )
+        # Update succeeds (no return needed for update)
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.patch("/api/scripts/s1/approve")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["message"] == "Script approved"
+        assert data["script_id"] == "s1"
+
+    def test_approve_script_not_found(self):
+        """PATCH /api/scripts/:id/approve returns 404 when script missing."""
+        from fastapi.testclient import TestClient
+        from api import app
+
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[],
+        )
+
+        with patch("engine.supabase_client.get_client", return_value=mock_client):
+            client = TestClient(app)
+            resp = client.patch("/api/scripts/nonexistent-id/approve")
+
+        assert resp.status_code == 404

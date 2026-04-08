@@ -201,10 +201,13 @@ def generate_script(
             )
 
             chunks: list[str] = []
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    chunks.append(delta)
+            for i, chunk in enumerate(stream):
+                if not chunk.choices:
+                    _logger.warning("Empty choices at chunk %d — skipping", i)
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    chunks.append(delta.content)
 
             full_text = "".join(chunks)
             _logger.info("LLM response: %d chars", len(full_text))

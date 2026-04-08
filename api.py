@@ -5,13 +5,15 @@ Run:  python api.py          (starts on port 5175)
 Test: curl http://localhost:5175/api/status
 
 Endpoints:
-  GET  /api/status        — pipeline summary (topics + scripts + metrics)
-  GET  /api/scripts       — list scripts (optional ?status=&channel=&limit=)
-  GET  /api/scripts/:id   — script detail + formatted preview
-  POST /api/generate      — queue a new topic for generation
-  POST /api/queue          — batch queue multiple topics
-  POST /api/dispatch/:id   — dispatch a script to its factory
-  GET  /api/suggestions   — topic suggestions from Brain2 + Forge
+  GET  /api/status          — pipeline summary (topics + scripts + metrics)
+  GET  /api/scripts         — list scripts (optional ?status=&channel=&limit=)
+  GET  /api/scripts/:id     — script detail + formatted preview
+  PATCH /api/scripts/:id/approve — approve a script
+  POST /api/generate        — queue a new topic for generation
+  POST /api/queue           — batch queue multiple topics
+  POST /api/dispatch/:id    — dispatch a script to its factory
+  GET  /api/topics          — list topics (optional ?status=&channel=&limit=)
+  GET  /api/suggestions     — topic suggestions from Brain2 + Forge
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -186,6 +188,25 @@ async def get_suggestions(channel: str = "ai", count: int = 5):
     from engine.topic_engine import suggest_topics
     topics = suggest_topics(channel=channel, count=count)
     return {"suggestions": topics}
+
+
+# ── PATCH /api/scripts/{script_id}/approve ──────────────────────────────────
+@app.patch("/api/scripts/{script_id}/approve")
+async def approve_script(script_id: str):
+    """Approve a script."""
+    from datetime import datetime, timezone
+    from engine.supabase_client import get_client
+    client = get_client()
+
+    row = client.table("tpe_scripts").select("id").eq("id", script_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Script not found")
+
+    client.table("tpe_scripts").update({
+        "status": "approved",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", script_id).execute()
+    return {"message": "Script approved", "script_id": script_id}
 
 
 # ── GET /api/topics ───────────────────────────────────────────────────────────
