@@ -248,15 +248,13 @@ async def reject_script(script_id: str):
 # ── GET /api/health — combined health check (AC-108) ─────────────────────────
 @app.get("/api/health")
 async def api_health():
-    """Extended health check with embedding provider status."""
-    from engine.brain2_client import _build_provider_chain
+    """Extended health check with Brain2 backend status."""
+    from engine.brain2_client import BACKEND
 
-    providers = _build_provider_chain()
     return {
         "api": "running",
         "version": "3.2",
-        "embedding_providers": len(providers),
-        "provider_names": [name for name, _ in providers],
+        "brain2_backend": BACKEND,
         "supabase": "connected",
     }
 

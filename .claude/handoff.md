@@ -1616,6 +1616,14 @@ git commit -m "feat: Premium UX overhaul — glassmorphism, animations, Toast, C
 
 ## 📝 KẾT QUẢ PHIÊN
 
+### [2026-10-14] — Brain2 search chuyển sang chỉ mục cục bộ (bge-m3)
+**Ai ghi:** Claude Code (theo yêu cầu anh Thông "chuyển ba engine đó sang cục bộ luôn")
+**Lý do:** bảng Supabase `vault_embeddings` đứng yên từ 2026-08-20; embed qua OpenRouter trả 402 (hết credit) → Brain2 search của engine hỏng âm thầm.
+**Hướng:** Brain2 search chuyển sang chỉ mục cục bộ miễn phí Ollama `bge-m3` qua cầu nối Python dùng chung `/Users/rio/Active/BRAIN2/vault-embedder/python/brain2_local.py` (gọi `node src/local-index.js --json`). Ollama tắt → log `BLOCKED`, trả `[]`, engine chạy tiếp.
+**Điều kiện:** app Ollama đang mở + có model `bge-m3`. Lần gọi đầu sau khi vault đổi nhiều có thể mất ~1 phút để đồng bộ chỉ mục.
+**Files đã sửa (chưa commit):** `engine/brain2_client.py` (`search_vault`/`get_context_for_topic` giữ chữ ký, `BACKEND="local-bge-m3"`), `api.py` (`/api/health` trả `brain2_backend`), `tests/test_api.py`, `tests/test_brain2_client.py`.
+**Kiểm chứng:** pytest 121 passed, 1 failed — `test_dispatcher::test_dispatch_not_found_raises` lỗi có sẵn từ trước (đã kiểm bằng `git stash`, lỗi postgrest APIError), không do thay đổi này.
+
 ### [2026-04-08 14:55] — Claude Code: Task 8 COMPLETED ✅
 **Status:** ✅ Hoàn thành Task 8 (LLM Multi-Provider Fallback + Component Extraction)
 **Ai ghi:** Claude Code

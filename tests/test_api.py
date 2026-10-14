@@ -229,18 +229,17 @@ class TestHealthEndpoint:
         assert resp.json() == {"status": "ok"}
 
     def test_api_health_returns_provider_info(self):
-        """GET /api/health returns embedding provider count."""
+        """GET /api/health returns Brain2 backend."""
         from fastapi.testclient import TestClient
         from api import app
 
-        with patch("engine.brain2_client._build_provider_chain", return_value=[("vertex", lambda x: x)]):
-            client = TestClient(app)
-            resp = client.get("/api/health")
+        client = TestClient(app)
+        resp = client.get("/api/health")
 
         assert resp.status_code == 200
         data = resp.json()
         assert "api" in data
-        assert "embedding_providers" in data
+        assert data["brain2_backend"] == "local-bge-m3"
         assert "version" in data
 
 
